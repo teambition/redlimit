@@ -1,0 +1,10 @@
+[alias]
+lint = "clippy --workspace --tests --examples --bins -- -Dclippy::todo"
+lint-all = "clippy --workspace --all-features --tests --examples --bins -- -Dclippy::todo"
+
+# testing
+ci-doctest-default = "test --workspace --doc --no-fail-fast -- --nocapture"
+ci-doctest = "test --workspace --all-features --doc --no-fail-fast -- --nocapture"
+
+# compile docs as docs.rs would
+# RUSTDOCFLAGS="--cfg=docsrs" cargo +nightly doc --no-deps --workspace
