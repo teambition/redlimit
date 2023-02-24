@@ -1,6 +1,7 @@
 use std::{
     cell::{Ref, RefMut},
     collections::HashMap,
+    time::Instant,
 };
 
 use actix_utils::future::{ready, Ready};
@@ -9,13 +10,14 @@ use actix_web::{
     error::ErrorInternalServerError,
     Error, HttpMessage, HttpRequest,
 };
+use chrono::{DateTime, Utc};
 use futures_core::future::LocalBoxFuture;
 use serde_json::Value;
-use tokio::time::Instant;
 
 pub struct ContextTransform;
 
 pub struct Context {
+    pub time: DateTime<Utc>,
     pub start: Instant,
     pub log: HashMap<String, Value>,
 }
@@ -23,6 +25,7 @@ pub struct Context {
 impl Context {
     pub fn new() -> Self {
         Context {
+            time: Utc::now(),
             start: Instant::now(),
             log: HashMap::new(),
         }
@@ -94,6 +97,8 @@ where
     fn call(&self, req: ServiceRequest) -> Self::Future {
         let mut ctx = Context::new();
         ctx.log
+            .insert("time".to_string(), Value::from(ctx.time.to_rfc3339()));
+        ctx.log
             .insert("method".to_string(), Value::from(req.method().as_str()));
         ctx.log.insert("path".to_string(), Value::from(req.path()));
         ctx.log.insert(
@@ -118,6 +123,7 @@ where
                 let status = res.response().status();
                 let mut ctx = res.request().context_mut().unwrap();
                 let elapsed = ctx.start.elapsed().as_millis() as u64;
+
                 ctx.log.insert("duration".to_string(), Value::from(elapsed));
                 ctx.log
                     .insert("status".to_string(), Value::from(status.as_u16()));

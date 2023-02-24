@@ -1,156 +1,90 @@
-use actix_web::{
-    get, http::header, web, App, Error, HttpRequest, HttpResponse, HttpServer, Responder,
-};
-use rustis::client::{Config, PooledClientManager};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use tokio::time::{timeout, Duration};
+use std::{fs::File, io::BufReader};
 
+use actix_web::{web, App, HttpServer};
+use rustls::{Certificate, PrivateKey, ServerConfig};
+use rustls_pemfile::{certs, pkcs8_private_keys};
+use tokio::time::Duration;
+
+mod api;
+mod conf;
 mod context;
+mod redis;
 mod redlimit;
-
-use crate::context::ContextExt;
-
-#[derive(Serialize, Deserialize)]
-struct AppInfo {
-    version: String,
-}
-
-#[get("/version")]
-async fn version(
-    req: HttpRequest,
-    info: web::Data<AppInfo>,
-    pool: web::Data<redlimit::RedisPool>,
-) -> impl Responder {
-    let state = pool.state();
-    let mut ctx = req.context_mut().unwrap();
-    ctx.log
-        .insert("connections".to_string(), Value::from(state.connections));
-    ctx.log.insert(
-        "idle_connections".to_string(),
-        Value::from(state.idle_connections),
-    );
-    web::Json(info)
-}
-
-#[derive(Deserialize)]
-struct LimitQuery {
-    id: String,
-    args: String,
-}
-
-async fn get_limiting(
-    req: HttpRequest,
-    pool: web::Data<redlimit::RedisPool>,
-    info: web::Query<LimitQuery>,
-) -> Result<HttpResponse, Error> {
-    let res = serde_json::from_str::<Vec<u64>>(info.args.as_str());
-    if res.is_err() {
-        return Ok(HttpResponse::BadRequest().body(res.err().unwrap().to_string()));
-    }
-    limiting(req, pool, info.id.to_string(), res.unwrap()).await
-}
-
-#[derive(Deserialize)]
-struct LimitRequest {
-    id: String,
-    args: Vec<u64>,
-}
-
-async fn post_limiting(
-    req: HttpRequest,
-    pool: web::Data<redlimit::RedisPool>,
-    input: web::Json<LimitRequest>,
-) -> Result<HttpResponse, Error> {
-    let input = input.into_inner();
-    limiting(req, pool, input.id, input.args).await
-}
-
-static APPLICATION_JSON: header::HeaderValue = header::HeaderValue::from_static("application/json");
-static APPLICATION_CBOR: header::HeaderValue = header::HeaderValue::from_static("application/cbor");
-
-async fn limiting(
-    req: HttpRequest,
-    pool: web::Data<redlimit::RedisPool>,
-    id: String,
-    args: Vec<u64>,
-) -> Result<HttpResponse, Error> {
-    let rt = match timeout(
-        Duration::from_millis(100),
-        redlimit::limiting(pool, id.clone(), args),
-    )
-    .await
-    {
-        Ok(rt) => rt,
-        Err(_) => Err("limiting timeout".to_string()),
-    };
-
-    let rt = match rt {
-        Ok(rt) => rt,
-        Err(err) => {
-            log::error!("redis error: {}", err);
-            redlimit::LimitResult(0, 0)
-        }
-    };
-
-    let accept = req.headers().get(header::ACCEPT);
-    let accept_cbor = accept.is_some() && accept.unwrap() == APPLICATION_CBOR;
-    let mut ctx = req.context_mut().unwrap();
-    ctx.log.insert("id".to_string(), Value::from(id.clone()));
-    ctx.log.insert("count".to_string(), Value::from(rt.0));
-    ctx.log.insert("limited".to_string(), Value::from(rt.1 > 0));
-    ctx.log.insert("cbor".to_string(), Value::from(accept_cbor));
-
-    match serde_json::to_string(&rt) {
-        Ok(body) => Ok(HttpResponse::Ok()
-            .content_type(&APPLICATION_JSON)
-            .body(body)),
-        Err(err) => Ok(HttpResponse::BadRequest().body(err.to_string())),
-    }
-}
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    std::env::set_var("RUST_LOG", "info");
+    let cfg = conf::Conf::new().unwrap_or_else(|err| panic!("config error: {}", err));
 
-    // set up redis connection pool
-    let manager = PooledClientManager::new(Config::default()).unwrap();
-    let pool = redlimit::RedisPool::builder()
-        .max_size(100)
-        .min_idle(Some(2))
-        .max_lifetime(None)
-        .idle_timeout(Some(Duration::new(600, 0)))
-        .connection_timeout(Duration::new(1, 0))
-        .build(manager)
-        .await
-        .unwrap();
-
-    if let Err(err) = redlimit::load_fn(pool.clone()).await {
-        log::error!("redis FUNCTION Load error: {}", err);
-        panic!("redis FUNCTION Load error: {}", err)
-    }
-
+    std::env::set_var("RUST_LOG", cfg.log.level.as_str());
     json_env_logger2::init();
     json_env_logger2::panic_hook();
-    log::info!("starting HTTP server at http://localhost:8080");
+    log::debug!("{:?}", cfg);
 
-    HttpServer::new(move || {
+    let pool = redis::new(cfg.redis)
+        .await
+        .unwrap_or_else(|err| panic!("redis connection pool error: {}", err));
+
+    if let Err(err) = redlimit::load_fn(pool.clone()).await {
+        panic!("redis FUNCTION error: {}", err)
+    }
+
+    log::info!("starting redlimit service at 0.0.0.0:{}", cfg.server.port);
+
+    let server = HttpServer::new(move || {
         App::new()
-            .app_data(web::Data::new(AppInfo {
+            .app_data(web::Data::new(api::AppInfo {
                 version: String::from("v0.1.0"),
             }))
             .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(redlimit::RedRules::new(&cfg.rules)))
             .wrap(context::ContextTransform {})
             .service(
                 web::resource("/limiting")
-                    .route(web::get().to(get_limiting))
-                    .route(web::post().to(post_limiting)),
+                    .route(web::get().to(api::get_limiting))
+                    .route(web::post().to(api::post_limiting)),
             )
-            .service(version)
+            .service(api::version)
     })
-    .workers(3)
-    .keep_alive(Duration::from_secs(75))
-    .bind(("127.0.0.1", 8080))?
-    .run()
-    .await
+    .workers(2)
+    .keep_alive(Duration::from_secs(25))
+    .shutdown_timeout(10);
+
+    let addr = ("0.0.0.0", cfg.server.port);
+    if cfg.server.key_file.is_empty() || cfg.server.cert_file.is_empty() {
+        server.bind(addr)?.run().await
+    } else {
+        let config = load_rustls_config(cfg.server);
+        server.bind_rustls(addr, config)?.run().await
+    }
+}
+
+fn load_rustls_config(cfg: conf::Server) -> rustls::ServerConfig {
+    // init server config builder with safe defaults
+    let config = ServerConfig::builder()
+        .with_safe_defaults()
+        .with_no_client_auth();
+
+    // load TLS key/cert files
+    let cert_file = &mut BufReader::new(File::open(cfg.cert_file.as_str()).unwrap());
+    let key_file = &mut BufReader::new(File::open(cfg.key_file.as_str()).unwrap());
+
+    // convert files to key/cert objects
+    let cert_chain = certs(cert_file)
+        .unwrap()
+        .into_iter()
+        .map(Certificate)
+        .collect();
+    let mut keys: Vec<PrivateKey> = pkcs8_private_keys(key_file)
+        .unwrap()
+        .into_iter()
+        .map(PrivateKey)
+        .collect();
+
+    // exit if no keys could be parsed
+    if keys.is_empty() {
+        eprintln!("Could not locate PKCS 8 private keys.");
+        std::process::exit(1);
+    }
+
+    config.with_single_cert(cert_chain, keys.remove(0)).unwrap()
 }
