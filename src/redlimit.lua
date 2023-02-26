@@ -80,6 +80,10 @@ local function redlist_add(keys, args)
   local ts = now_ms()
   redis.call('ZREMRANGEBYSCORE', key, '-inf', '(' .. ts)
 
+  if #args == 0 then
+    return 0
+  end
+
   local members = {}
   for i = 1, #args, 2 do
     members[i] = ts + (tonumber(args[i + 1]) or 1000)
@@ -94,9 +98,11 @@ end
 -- return: [<member>, <ttl with millisecond> ...] or error
 local function redlist_scan(keys, args)
   local key = '_RL_' .. keys[1]
-  local ts = now_ms()
   local count = tonumber(args[1]) or 100
-  local cursor = tonumber(args[2]) or ts
+  local cursor = tonumber(args[2]) or 0
+  if cursor == 0 then
+    cursor = now_ms()
+  end
 
   local res = redis.call('ZRANGE', key, cursor, -1, 'BYSCORE', 'LIMIT', count, 'WITHSCORES')
 end
@@ -106,17 +112,21 @@ end
 -- return: integer or error
 local function redrules_add(keys, args)
   local key = '_RR_' .. keys[1]
-  local id = args[1] .. args[2]
   local ts = now_ms()
   local members = redis.call('ZRANGE', key, '-inf', '(' .. ts, 'BYSCORE')
   if #members > 0 then
     redis.call('HDEL', key, unpack(members))
   end
 
+  if #args == 0 then
+    return 0
+  end
+
+  local id = args[1] .. args[2]
   local quantity = tonumber(args[3]) or 1
   local ttl = ts + (tonumber(args[4]) or 1000)
   redis.call('ZADD', key, ttl, id)
-  redis.call('HSET', key, id, cjson.encode({args[1], args[2], quantity,  ttl}))
+  return redis.call('HSET', key, id, cjson.encode({args[1], args[2], quantity,  ttl}))
 end
 
 -- keys: <redrules key>

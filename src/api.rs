@@ -62,7 +62,9 @@ async fn limiting(
     input: LimitRequest,
 ) -> Result<HttpResponse, Error> {
     let ts = req.context()?.time.timestamp_millis();
-    let args = rules.limit_args(&input.scope, &input.path, &input.id, ts as u64);
+    let args = rules
+        .limit_args(ts as u64, &input.scope, &input.path, &input.id)
+        .await;
 
     let rt = match timeout(
         Duration::from_millis(100),
@@ -71,7 +73,7 @@ async fn limiting(
     .await
     {
         Ok(rt) => rt,
-        Err(_) => Err("limiting timeout".to_string()),
+        Err(_) => Err(anyhow::Error::msg("limiting timeout".to_string())),
     };
 
     let rt = match rt {

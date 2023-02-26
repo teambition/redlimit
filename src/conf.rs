@@ -33,7 +33,7 @@ pub struct Rule {
     pub limit: Vec<u64>,
 
     #[serde(default)]
-    pub path: HashMap<String, u16>,
+    pub path: HashMap<String, u64>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

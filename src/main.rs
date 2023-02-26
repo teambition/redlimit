@@ -12,7 +12,7 @@ mod redis;
 mod redlimit;
 
 #[tokio::main]
-async fn main() -> std::io::Result<()> {
+async fn main() -> anyhow::Result<()> {
     let cfg = conf::Conf::new().unwrap_or_else(|err| panic!("config error: {}", err));
 
     std::env::set_var("RUST_LOG", cfg.log.level.as_str());
@@ -20,23 +20,29 @@ async fn main() -> std::io::Result<()> {
     json_env_logger2::panic_hook();
     log::debug!("{:?}", cfg);
 
-    let pool = redis::new(cfg.redis)
-        .await
-        .unwrap_or_else(|err| panic!("redis connection pool error: {}", err));
+    let pool = web::Data::new(
+        redis::new(cfg.redis)
+            .await
+            .unwrap_or_else(|err| panic!("redis connection pool error: {}", err)),
+    );
 
     if let Err(err) = redlimit::load_fn(pool.clone()).await {
         panic!("redis FUNCTION error: {}", err)
     }
 
-    log::info!("starting redlimit service at 0.0.0.0:{}", cfg.server.port);
+    let redrules = web::Data::new(redlimit::RedRules::new(&cfg.rules));
+
+    // background jobs relating to local, disposable tasks
+    let (redrules_sync_handle, cancel_redrules_sync) =
+        redlimit::init_redrules_sync(pool.clone(), redrules.clone());
 
     let server = HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(api::AppInfo {
                 version: String::from("v0.1.0"),
             }))
-            .app_data(web::Data::new(pool.clone()))
-            .app_data(web::Data::new(redlimit::RedRules::new(&cfg.rules)))
+            .app_data(pool.clone())
+            .app_data(redrules.clone())
             .wrap(context::ContextTransform {})
             .service(
                 web::resource("/limiting")
@@ -49,13 +55,20 @@ async fn main() -> std::io::Result<()> {
     .keep_alive(Duration::from_secs(25))
     .shutdown_timeout(10);
 
+    log::info!("redlimit service start at 0.0.0.0:{}", cfg.server.port);
     let addr = ("0.0.0.0", cfg.server.port);
     if cfg.server.key_file.is_empty() || cfg.server.cert_file.is_empty() {
-        server.bind(addr)?.run().await
+        server.bind(addr)?.run().await?;
     } else {
         let config = load_rustls_config(cfg.server);
-        server.bind_rustls(addr, config)?.run().await
+        server.bind_rustls(addr, config)?.run().await?;
     }
+
+    cancel_redrules_sync.cancel();
+    redrules_sync_handle.await.unwrap();
+    log::info!("redlimit service shutdown gracefully");
+
+    Ok(())
 }
 
 fn load_rustls_config(cfg: conf::Server) -> rustls::ServerConfig {
