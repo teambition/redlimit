@@ -2,6 +2,11 @@
 name = "redlimit"
 version = "0.1.0"
 edition = "2021"
+description = "A redis-based distributed rate limit HTTP service."
+publish = false
+repository = "https://github.com/teambition/redlimit"
+license-file = "LICENSE"
+keywords = ["ratelimit", "redis", "distributed"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -10,6 +15,7 @@ rustls = "0.20.2"
 rustls-pemfile = "1"
 actix-web = { version = "4.3", features = ["rustls"] }
 actix-utils = "3"
+actix-rt = "2.8"
 futures-core = "0.3.26"
 tokio = { version = "1.25.0", features = ["full"] }
 tokio-util = "0.7"

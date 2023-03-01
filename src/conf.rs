@@ -56,3 +56,59 @@ impl Conf {
         builder.build()?.try_deserialize::<Conf>()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[actix_rt::test]
+    async fn config_works() -> anyhow::Result<()> {
+        let cfg = Conf::new()?;
+        assert_eq!("development", cfg.env);
+        assert_eq!("debug", cfg.log.level);
+        assert_eq!(8080, cfg.server.port);
+        assert_eq!("127.0.0.1", cfg.redis.host);
+        assert_eq!(6379, cfg.redis.port);
+        assert_eq!(3, cfg.job.interval);
+
+        let default_rules = cfg
+            .rules
+            .get("*")
+            .ok_or(anyhow::Error::msg("'*' not exists"))?;
+        assert_eq!(vec![10, 10000, 3, 1000], default_rules.limit);
+        assert!(default_rules.path.is_empty());
+
+        let floor_rules = cfg
+            .rules
+            .get("-")
+            .ok_or(anyhow::Error::msg("'-' not exists"))?;
+        assert_eq!(vec![3, 10000, 1, 1000], floor_rules.limit);
+        assert!(floor_rules.path.is_empty());
+
+        let core_rules = cfg
+            .rules
+            .get("core")
+            .ok_or(anyhow::Error::msg("'core' not exists"))?;
+        assert_eq!(vec![200, 10000, 10, 2000], core_rules.limit);
+        assert_eq!(
+            2,
+            core_rules
+                .path
+                .get("POST /v1/file/list")
+                .unwrap()
+                .to_owned()
+        );
+
+        Ok(())
+    }
+
+    #[actix_rt::test]
+    async fn config_from_env_works() -> anyhow::Result<()> {
+        std::env::set_var("CONFIG_FILE_PATH", "./config/test.toml");
+        let cfg = Conf::new()?;
+        assert_eq!("test", cfg.env);
+        assert_eq!("info", cfg.log.level);
+
+        Ok(())
+    }
+}

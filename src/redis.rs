@@ -20,10 +20,33 @@ pub async fn new(cfg: super::conf::Redis) -> Result<RedisPool, rustis::Error> {
     let manager = PooledClientManager::new(config).unwrap();
     RedisPool::builder()
         .max_size(1000)
-        .min_idle(Some(1))
+        .min_idle(Some(5))
         .max_lifetime(None)
         .idle_timeout(Some(Duration::from_secs(120)))
         .connection_timeout(Duration::from_secs(3))
         .build(manager)
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use rustis::resp;
+
+    use super::{super::conf, *};
+
+    #[actix_rt::test]
+    async fn redis_pool_works() -> anyhow::Result<()> {
+        let pool = new(conf::Redis {
+            host: "127.0.0.1".to_string(),
+            port: 6379,
+            username: String::new(),
+            password: String::new(),
+        })
+        .await?;
+
+        let data = pool.get().await?.send(resp::cmd("PING"), None).await?;
+        assert_eq!("PONG", data.to::<String>()?);
+
+        Ok(())
+    }
 }

@@ -10,6 +10,7 @@ mod conf;
 mod context;
 mod redis;
 mod redlimit;
+mod redlimit_lua;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

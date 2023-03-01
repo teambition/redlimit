@@ -10,14 +10,14 @@ use serde::{Deserialize, Serialize};
 use tokio::{sync::RwLock, task::JoinHandle, time::sleep};
 use tokio_util::sync::CancellationToken;
 
-use super::{conf::Rule, redis::RedisPool};
+use super::{conf::Rule, redis::RedisPool, redlimit_lua};
 
 pub struct RedRulesData {
     floor: Vec<u64>,
     defaut: Rule,
     rules: HashMap<String, Rule>,
-    dyn_rules: HashMap<String, (u64, u64)>,
-    dyn_blacklist: HashMap<String, u64>,
+    dyn_rules: HashMap<String, (u64, u64)>, // scope:path -> (quantity, ttl)
+    dyn_blacklist: HashMap<String, u64>,    // id -> ttl
     dyn_blacklist_cursor: u64,
 }
 
@@ -28,9 +28,9 @@ pub struct RedRules {
 impl RedRules {
     pub fn new(rules: &HashMap<String, Rule>) -> Self {
         let mut rr = RedRulesData {
-            floor: vec![3, 10000, 1, 1000],
+            floor: vec![2, 10000, 1, 1000],
             defaut: Rule {
-                limit: vec![10, 5000, 3, 1000],
+                limit: vec![5, 5000, 2, 1000],
                 path: HashMap::new(),
             },
             rules: HashMap::new(),
@@ -106,18 +106,23 @@ impl RedRules {
 
         rr.dyn_blacklist.retain(|_, v| *v > now);
         for (k, v) in dyn_blacklist {
-            rr.dyn_blacklist.insert(k, v);
+            if v > now {
+                rr.dyn_blacklist.insert(k, v);
+            }
         }
 
         rr.dyn_rules.retain(|_, v| v.1 > now);
         for (k, v) in dyn_rules {
-            rr.dyn_rules.insert(k, v);
+            if v.1 > now {
+                rr.dyn_rules.insert(k, v);
+            }
         }
     }
 }
 
 // (quantity, max count per period, period with millisecond, max burst, burst
 // period with millisecond)
+#[derive(PartialEq, Debug)]
 pub struct LimitArgs(pub u64, pub u64, pub u64, pub u64, pub u64);
 
 impl LimitArgs {
@@ -229,7 +234,9 @@ pub async fn redrules_add(
 }
 
 pub async fn load_fn(pool: web::Data<RedisPool>) -> Result<()> {
-    let cmd = resp::cmd("FUNCTION").arg("LOAD").arg(REDLIMIT);
+    let cmd = resp::cmd("FUNCTION")
+        .arg("LOAD")
+        .arg(redlimit_lua::REDLIMIT);
     let data = pool.get().await?.send(cmd, None).await?;
     if data.is_error() {
         let err = data.to_string();
@@ -414,164 +421,260 @@ fn scoped_string(a: &str, b: &str) -> String {
     s
 }
 
-static REDLIMIT: &str = r#"#!lua name=redlimit
+#[cfg(test)]
+mod tests {
 
-local function now_ms()
-  local now = redis.call('TIME')
-  return tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)
-end
+    use super::{super::conf, *};
 
--- keys: <an identifier to rate limit against>
--- args (should be well formed): <quantity> <max count per period> <period with millisecond> [<max burst> <burst period with millisecond>]
--- return: [<count in period> or 0, <wait duration with millisecond> or 0]
-local function limiting(keys, args)
-  local quantity = tonumber(args[1]) or 1
-  local max_count = tonumber(args[2]) or 0
-  local period = tonumber(args[3]) or 0
-  local max_burst  = tonumber(args[4]) or 0
-  local burst_period  = tonumber(args[5]) or 1000
+    #[actix_rt::test]
+    async fn limit_args_works() -> anyhow::Result<()> {
+        assert_eq!(LimitArgs(1, 0, 0, 0, 0), LimitArgs::new(1, &vec![]));
+        assert_eq!(LimitArgs(2, 0, 0, 0, 0), LimitArgs::new(2, &vec![]));
+        assert_eq!(LimitArgs(2, 0, 0, 0, 0), LimitArgs::new(2, &vec![100]));
 
-  local result = {quantity, 0}
-  if quantity > max_count then
-    result[2] = 1
-    return result
-  end
+        assert_eq!(
+            LimitArgs(3, 100, 10000, 0, 0),
+            LimitArgs::new(3, &vec![100, 10000])
+        );
 
-  local burst = 0
-  local burst_at = 0
-  local limit = redis.call('HMGET', keys[1], 'c', 'b', 't')
-  -- field:c(count in period)
-  -- field:b(burst in burst period)
-  -- field:t(burst start time, millisecond)
+        assert_eq!(
+            LimitArgs(3, 100, 10000, 10, 0),
+            LimitArgs::new(3, &vec![100, 10000, 10])
+        );
 
-  if limit[1] then
-    result[1] = tonumber(limit[1]) + quantity
+        assert_eq!(
+            LimitArgs(1, 200, 10000, 10, 2000),
+            LimitArgs::new(1, &vec![200, 10000, 10, 2000])
+        );
 
-    if max_burst > 0 then
-      local ts = now_ms()
-      burst = tonumber(limit[2]) + quantity
-      burst_at = tonumber(limit[3])
-      if burst_at + burst_period <= ts  then
-        burst = quantity
-        burst_at = ts
-      elseif burst > max_burst then
-        result[1] = result[1] - quantity
-        result[2] = burst_at + burst_period - ts
-        return result
-      end
-    end
+        assert_eq!(
+            LimitArgs(1, 0, 0, 0, 0),
+            LimitArgs::new(1, &vec![200, 10000, 10, 2000, 1])
+        );
 
-    if result[1] > max_count then
-      result[1] = result[1] - quantity
-      result[2] = redis.call('PTTL', keys[1])
+        Ok(())
+    }
 
-      if result[2] <= 0 then
-        result[2] = 1
-        redis.call('DEL', keys[1])
-      end
-    elseif max_burst > 0 then
-      redis.call('HSET', keys[1], 'c', result[1], 'b', burst, 't', burst_at)
-    else
-      redis.call('HSET', keys[1], 'c', result[1])
-    end
+    #[actix_rt::test]
+    async fn red_rules_works() -> anyhow::Result<()> {
+        std::env::set_var("CONFIG_FILE_PATH", "./config/test.toml");
 
-  else
-    if max_burst > 0 then
-      burst = quantity
-      burst_at = now_ms()
-    end
+        let cfg = conf::Conf::new()?;
+        let redrules = RedRules::new(&cfg.rules);
 
-    redis.call('HSET', keys[1], 'c', quantity, 'b', burst, 't', burst_at)
-    redis.call('PEXPIRE', keys[1], period)
-  end
+        {
+            let rr = redrules.inner.read().await;
+            assert_eq!(vec![3, 10000, 1, 1000], rr.floor);
 
-  return result
-end
+            assert_eq!(vec![10, 10000, 3, 1000], rr.defaut.limit);
+            assert!(rr.defaut.path.is_empty());
 
--- keys: <redlist key>
--- args: <member> <expire duration with millisecond> [<member> <expire duration with millisecond> ...]
--- return: integer or error
-local function redlist_add(keys, args)
-  local key_add = '_RLA_' .. keys[1]
-  local key_exp = '_RLE_' .. keys[1]
-  local ts = now_ms()
-  local members = redis.call('ZRANGE', key_exp, '-inf', '(' .. ts, 'BYSCORE')
-  if #members > 0 then
-    redis.call('ZREM', key_add, unpack(members))
-    redis.call('ZREM', key_exp, unpack(members))
-  end
+            assert_eq!(0, rr.dyn_blacklist_cursor);
 
-  if #args == 0 then
-    return 0
-  end
+            let core_rules = rr
+                .rules
+                .get("core")
+                .ok_or(anyhow::Error::msg("'core' not exists"))?;
+            assert_eq!(vec![200, 10000, 10, 2000], core_rules.limit);
+            assert_eq!(
+                2,
+                core_rules
+                    .path
+                    .get("POST /v1/file/list")
+                    .unwrap()
+                    .to_owned()
+            );
 
-  local members_add = {}
-  local members_exp = {}
-  for i = 1, #args, 2 do
-    members_add[i] = ts + i
-    members_add[i + 1] = args[i]
-    members_exp[i] = ts + (tonumber(args[i + 1]) or 1000)
-    members_exp[i + 1] = args[i]
-  end
+            assert!(rr.rules.get("core2").is_none());
+        }
 
-  redis.call('ZADD', key_exp, unpack(members_exp))
-  return redis.call('ZADD', key_add, unpack(members_add))
-end
+        {
+            assert!(redrules.redlist(0).await.is_empty());
+            assert!(redrules.redrules(0).await.is_empty());
 
--- keys: <redlist key>
--- args: <cursor>
--- return: [<cursor>, <member>, <ttl with millisecond>, <member>, <ttl with millisecond> ...] or error
-local function redlist_scan(keys, args)
-  local key_add = '_RLA_' .. keys[1]
-  local key_exp = '_RLE_' .. keys[1]
-  local cursor = tonumber(args[2]) or 0
+            assert_eq!(
+                LimitArgs(2, 200, 10000, 10, 2000),
+                redrules
+                    .limit_args(0, "core", "POST /v1/file/list", "user1")
+                    .await
+            );
+            assert_eq!(
+                LimitArgs(2, 200, 10000, 10, 2000),
+                redrules
+                    .limit_args(0, "core", "POST /v1/file/list", "user2")
+                    .await,
+                "any user"
+            );
 
-  local res = {}
-  local members = redis.call('ZRANGE', key_add, cursor, 'inf', 'BYSCORE', 'LIMIT', 0, 10000)
-  if #members > 0 then
-    local ttls = redis.call('ZMSCORE', key_exp, unpack(members))
-    table.insert(res, redis.call('ZSCORE', key_add, members[#members]))
-    for i = 1, #members, 1 do
-      table.insert(res, members[i])
-      table.insert(res, ttls[i] or '0')
-    end
-  end
-  return res
-end
+            assert_eq!(
+                LimitArgs(1, 200, 10000, 10, 2000),
+                redrules
+                    .limit_args(0, "core", "POST /v2/file/list", "user1")
+                    .await,
+                "path not exists"
+            );
 
--- keys: <redrule key>
--- args: <scope> <path> <quantity> <expire duration with millisecond>
--- return: integer or error
-local function redrules_add(keys, args)
-  local key = '_RR_' .. keys[1]
-  local ts = now_ms()
-  local members = redis.call('ZRANGE', key, '-inf', '(' .. ts, 'BYSCORE')
-  if #members > 0 then
-    redis.call('HDEL', key, unpack(members))
-  end
+            assert_eq!(
+                LimitArgs(1, 10, 10000, 3, 1000),
+                redrules
+                    .limit_args(0, "core2", "POST /v1/file/list", "user1")
+                    .await,
+                "scope not exists"
+            );
+        }
 
-  if #args == 0 then
-    return 0
-  end
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before Unix epoch")
+            .as_millis() as u64;
+        {
+            let mut dyn_blacklist = HashMap::new();
+            dyn_blacklist.insert("user1".to_owned(), ts + 1000);
+            redrules
+                .dyn_update(ts, 1, dyn_blacklist, HashMap::new())
+                .await;
 
-  local id = args[1] .. args[2]
-  local quantity = tonumber(args[3]) or 1
-  local ttl = ts + (tonumber(args[4]) or 1000)
-  redis.call('ZADD', key, ttl, id)
-  return redis.call('HSET', key, id, cjson.encode({args[1], args[2], quantity,  ttl}))
-end
+            {
+                let rr = redrules.inner.read().await;
+                assert_eq!(1, rr.dyn_blacklist_cursor);
+            }
 
--- keys: <redrules key>
--- return: array or error
-local function redrules_all(keys, args)
-  local key = '_RR_' .. keys[1]
-  return redis.call('HVALS', key)
-end
+            assert_eq!(1, redrules.redlist(0).await.len());
+            assert_eq!(1, redrules.redlist(ts + 1000).await.len());
+            assert!(redrules.redlist(ts + 1001).await.is_empty());
+            assert!(redrules.redrules(0).await.is_empty());
 
-redis.register_function('limiting', limiting)
-redis.register_function('redlist_add', redlist_add)
-redis.register_function('redlist_scan', redlist_scan)
-redis.register_function('redrules_add', redrules_add)
-redis.register_function('redrules_all', redrules_all)
+            assert_eq!(
+                LimitArgs(1, 3, 10000, 1, 1000),
+                redrules
+                    .limit_args(0, "core", "POST /v1/file/list", "user1")
+                    .await,
+                "limited by dyn_blacklist"
+            );
+            assert_eq!(
+                LimitArgs(2, 200, 10000, 10, 2000),
+                redrules
+                    .limit_args(0, "core", "POST /v1/file/list", "user2")
+                    .await,
+                "not limited by dyn_blacklist"
+            );
+            assert_eq!(
+                LimitArgs(1, 3, 10000, 1, 1000),
+                redrules
+                    .limit_args(ts, "core", "POST /v1/file/list", "user1")
+                    .await,
+                "limited by dyn_blacklist"
+            );
+            assert_eq!(
+                LimitArgs(2, 200, 10000, 10, 2000),
+                redrules
+                    .limit_args(ts + 1001, "core", "POST /v1/file/list", "user1")
+                    .await,
+                "not limited by dyn_blacklist after ttl"
+            );
+        }
 
-"#;
+        {
+            let mut dyn_rules = HashMap::new();
+            dyn_rules.insert("core:POST /v1/file/list".to_owned(), (3, ts + 1000));
+            dyn_rules.insert("core:GET /v1/file/list".to_owned(), (5, ts + 1000));
+            redrules.dyn_update(ts, 2, HashMap::new(), dyn_rules).await;
+
+            {
+                let rr = redrules.inner.read().await;
+                assert_eq!(2, rr.dyn_blacklist_cursor);
+            }
+
+            assert_eq!(1, redrules.redlist(0).await.len());
+            assert_eq!(2, redrules.redrules(0).await.len());
+            assert_eq!(2, redrules.redrules(ts + 1000).await.len());
+            assert!(redrules.redrules(ts + 1001).await.is_empty());
+
+            assert_eq!(
+                LimitArgs(1, 3, 10000, 1, 1000),
+                redrules
+                    .limit_args(0, "core", "POST /v1/file/list", "user1")
+                    .await,
+                "limited by dyn_blacklist"
+            );
+            assert_eq!(
+                LimitArgs(3, 200, 10000, 10, 2000),
+                redrules
+                    .limit_args(0, "core", "POST /v1/file/list", "user2")
+                    .await,
+                "limited by dyn_rules"
+            );
+            assert_eq!(
+                LimitArgs(5, 200, 10000, 10, 2000),
+                redrules
+                    .limit_args(0, "core", "GET /v1/file/list", "user2")
+                    .await,
+                "limited by dyn_rules"
+            );
+
+            assert_eq!(
+                LimitArgs(2, 200, 10000, 10, 2000),
+                redrules
+                    .limit_args(ts + 1001, "core", "POST /v1/file/list", "user1")
+                    .await,
+                "not limited by dyn_blacklist after ttl"
+            );
+            assert_eq!(
+                LimitArgs(2, 200, 10000, 10, 2000),
+                redrules
+                    .limit_args(ts + 1001, "core", "POST /v1/file/list", "user2")
+                    .await,
+                "not limited by dyn_blacklist after ttl"
+            );
+            assert_eq!(
+                LimitArgs(1, 200, 10000, 10, 2000),
+                redrules
+                    .limit_args(ts + 1001, "core", "GET /v1/file/list", "user2")
+                    .await,
+                "not limited by dyn_blacklist after ttl"
+            );
+        }
+
+        {
+            redrules
+                .dyn_update(ts + 1001, ts, HashMap::new(), HashMap::new())
+                .await;
+
+            {
+                let rr = redrules.inner.read().await;
+                assert_eq!(ts, rr.dyn_blacklist_cursor);
+            }
+
+            assert!(
+                redrules.redlist(0).await.is_empty(),
+                "auto sweep stale rules"
+            );
+            assert!(
+                redrules.redrules(0).await.is_empty(),
+                "auto sweep stale rules"
+            );
+
+            let mut dyn_rules = HashMap::new();
+            dyn_rules.insert("core:POST /v1/file/list".to_owned(), (3, ts + 1000)); // stale rules
+            dyn_rules.insert("core:GET /v1/file/list".to_owned(), (5, ts + 1002));
+
+            redrules
+                .dyn_update(ts + 1001, ts + 1, HashMap::new(), dyn_rules)
+                .await;
+
+            {
+                let rr = redrules.inner.read().await;
+                assert_eq!(ts + 1, rr.dyn_blacklist_cursor);
+            }
+
+            assert!(redrules.redlist(0).await.is_empty());
+            assert_eq!(
+                1,
+                redrules.redrules(0).await.len(),
+                "stale rules should not be added"
+            );
+        }
+
+        Ok(())
+    }
+}
