@@ -76,35 +76,51 @@ end
 -- args: <member> <expire duration with millisecond> [<member> <expire duration with millisecond> ...]
 -- return: integer or error
 local function redlist_add(keys, args)
-  local key = '_RL_' .. keys[1]
+  local key_add = '_RLA_' .. keys[1]
+  local key_exp = '_RLE_' .. keys[1]
   local ts = now_ms()
-  redis.call('ZREMRANGEBYSCORE', key, '-inf', '(' .. ts)
+  local members = redis.call('ZRANGE', key_exp, '-inf', '(' .. ts, 'BYSCORE')
+  if #members > 0 then
+    redis.call('ZREM', key_add, unpack(members))
+    redis.call('ZREM', key_exp, unpack(members))
+  end
 
   if #args == 0 then
     return 0
   end
 
-  local members = {}
+  local members_add = {}
+  local members_exp = {}
   for i = 1, #args, 2 do
-    members[i] = ts + (tonumber(args[i + 1]) or 1000)
-    members[i + 1] = args[i]
+    members_add[i] = ts + i
+    members_add[i + 1] = args[i]
+    members_exp[i] = ts + (tonumber(args[i + 1]) or 1000)
+    members_exp[i + 1] = args[i]
   end
 
-  return redis.call('ZADD', key, unpack(members))
+  redis.call('ZADD', key_exp, unpack(members_exp))
+  return redis.call('ZADD', key_add, unpack(members_add))
 end
 
 -- keys: <redlist key>
--- args: <limit count> <cursor>
--- return: [<member>, <ttl with millisecond> ...] or error
+-- args: <cursor>
+-- return: [<cursor>, <member>, <ttl with millisecond>, <member>, <ttl with millisecond> ...] or error
 local function redlist_scan(keys, args)
-  local key = '_RL_' .. keys[1]
-  local count = tonumber(args[1]) or 100
+  local key_add = '_RLA_' .. keys[1]
+  local key_exp = '_RLE_' .. keys[1]
   local cursor = tonumber(args[2]) or 0
-  if cursor == 0 then
-    cursor = now_ms()
-  end
 
-  local res = redis.call('ZRANGE', key, cursor, -1, 'BYSCORE', 'LIMIT', count, 'WITHSCORES')
+  local res = {}
+  local members = redis.call('ZRANGE', key_add, cursor, 'inf', 'BYSCORE', 'LIMIT', 0, 10000)
+  if #members > 0 then
+    local ttls = redis.call('ZMSCORE', key_exp, unpack(members))
+    table.insert(res, redis.call('ZSCORE', key_add, members[#members]))
+    for i = 1, #members, 1 do
+      table.insert(res, members[i])
+      table.insert(res, ttls[i] or '0')
+    end
+  end
+  return res
 end
 
 -- keys: <redrule key>

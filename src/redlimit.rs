@@ -1,8 +1,10 @@
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::HashMap,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use actix_web::web;
 use anyhow::{Error, Result};
-use chrono::Utc;
 use rustis::resp;
 use serde::{Deserialize, Serialize};
 use tokio::{sync::RwLock, task::JoinHandle, time::sleep};
@@ -51,6 +53,28 @@ impl RedRules {
         }
     }
 
+    pub async fn redlist(&self, now: u64) -> HashMap<String, u64> {
+        let rr = self.inner.read().await;
+        let mut redlist = HashMap::new();
+        for (k, v) in &rr.dyn_blacklist {
+            if *v >= now {
+                redlist.insert(k.clone(), *v);
+            }
+        }
+        redlist
+    }
+
+    pub async fn redrules(&self, now: u64) -> HashMap<String, (u64, u64)> {
+        let rr = self.inner.read().await;
+        let mut redrules = HashMap::new();
+        for (k, v) in &rr.dyn_rules {
+            if v.1 >= now {
+                redrules.insert(k.clone(), *v);
+            }
+        }
+        redrules
+    }
+
     pub async fn limit_args(&self, now: u64, scope: &str, path: &str, id: &str) -> LimitArgs {
         let rr = self.inner.read().await;
         if let Some(ttl) = rr.dyn_blacklist.get(id) {
@@ -73,21 +97,21 @@ impl RedRules {
     pub async fn dyn_update(
         &self,
         now: u64,
-        cursor: u64,
-        dyn_rules: HashMap<String, (u64, u64)>,
+        dyn_blacklist_cursor: u64,
         dyn_blacklist: HashMap<String, u64>,
+        dyn_rules: HashMap<String, (u64, u64)>,
     ) {
         let mut rr = self.inner.write().await;
-        rr.dyn_blacklist_cursor = cursor;
-
-        rr.dyn_rules.retain(|_, v| v.1 > now);
-        for (k, v) in dyn_rules {
-            rr.dyn_rules.insert(k, v);
-        }
+        rr.dyn_blacklist_cursor = dyn_blacklist_cursor;
 
         rr.dyn_blacklist.retain(|_, v| *v > now);
         for (k, v) in dyn_blacklist {
             rr.dyn_blacklist.insert(k, v);
+        }
+
+        rr.dyn_rules.retain(|_, v| v.1 > now);
+        for (k, v) in dyn_rules {
+            rr.dyn_rules.insert(k, v);
         }
     }
 }
@@ -164,6 +188,46 @@ pub async fn limiting(
     Ok(LimitResult(0, 0))
 }
 
+pub async fn redlist_add(pool: web::Data<RedisPool>, args: HashMap<String, u64>) -> Result<()> {
+    if args.is_empty() {
+        return Ok(());
+    }
+
+    let mut cmd = resp::cmd("FCALL")
+        .arg("redlist_add")
+        .arg(1)
+        .arg("dyn_blacklist");
+
+    for (k, v) in args {
+        cmd = cmd.arg(k).arg(v);
+    }
+
+    pool.get().await?.send(cmd, None).await?;
+    Ok(())
+}
+
+pub async fn redrules_add(
+    pool: web::Data<RedisPool>,
+    scope: &str,
+    rules: &HashMap<String, (u64, u64)>,
+) -> Result<()> {
+    if !rules.is_empty() {
+        let mut cli = pool.get().await?;
+        for (k, v) in rules {
+            let cmd = resp::cmd("FCALL")
+                .arg("redrules_add")
+                .arg(1)
+                .arg("dyn_rules")
+                .arg(scope.to_string())
+                .arg(k.clone())
+                .arg(v.0)
+                .arg(v.1);
+            cli.send(cmd, None).await?;
+        }
+    }
+    Ok(())
+}
+
 pub async fn load_fn(pool: web::Data<RedisPool>) -> Result<()> {
     let cmd = resp::cmd("FUNCTION").arg("LOAD").arg(REDLIMIT);
     let data = pool.get().await?.send(cmd, None).await?;
@@ -198,23 +262,31 @@ async fn spawn_redrules_sync(
 ) {
     loop {
         log::info!("starting redrules sync job");
+
         let cursor = redrules.inner.read().await.dyn_blacklist_cursor;
-        let now = Utc::now().timestamp_millis() as u64;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before Unix epoch")
+            .as_millis() as u64;
+
         let dyn_rules = load_redrules(pool.clone(), now)
             .await
-            .unwrap_or(HashMap::new());
-        let dyn_blacklist = load_blacklist(pool.clone(), now, cursor)
-            .await
+            .map_err(|e| log::error!("load_redrules error: {}", e))
             .unwrap_or(HashMap::new());
 
-        if !dyn_rules.is_empty() || !dyn_blacklist.is_empty() {
+        let dyn_blacklist = load_blacklist(pool.clone(), now, cursor)
+            .await
+            .map_err(|e| log::error!("load_blacklist error: {}", e))
+            .unwrap_or((cursor, HashMap::new()));
+
+        if !dyn_rules.is_empty() || !dyn_blacklist.1.is_empty() {
             redrules
-                .dyn_update(now, cursor, dyn_rules, dyn_blacklist)
+                .dyn_update(now, dyn_blacklist.0, dyn_blacklist.1, dyn_rules)
                 .await;
         }
 
         tokio::select! {
-            _ = sleep(Duration::from_secs(3)) => {
+            _ = sleep(Duration::from_secs(5)) => {
                 continue;
             }
 
@@ -263,11 +335,12 @@ async fn load_redrules(
     Ok(rt)
 }
 
+const REDLIST_SCAN_COUNT: usize = 10000;
 async fn load_blacklist(
     pool: web::Data<RedisPool>,
     now: u64,
     cursor: u64,
-) -> anyhow::Result<HashMap<String, u64>> {
+) -> anyhow::Result<(u64, HashMap<String, u64>)> {
     let mut cli = pool.get().await?;
     let mut cursor = cursor;
     let mut has_stale = false;
@@ -278,27 +351,41 @@ async fn load_blacklist(
             .arg("redlist_scan")
             .arg(1)
             .arg("dyn_blacklist")
-            .arg(1000)
             .arg(cursor);
 
         let data = cli.send(blacklist_cmd, None).await?.to::<Vec<String>>()?;
-        let has_next = data.len() >= 1000;
-        if has_next {
-            cursor = data[999].parse::<u64>()?;
-        }
+        let has_next = data.len() >= REDLIST_SCAN_COUNT;
 
         let mut iter = data.into_iter();
+        match iter.next() {
+            Some(c) => {
+                let new_cursor = c.parse::<u64>()?;
+                if cursor == new_cursor {
+                    cursor += 1;
+                } else {
+                    cursor = new_cursor;
+                }
+            }
+            None => {
+                break;
+            }
+        }
+
         loop {
             if let Some(id) = iter.next() {
-                if let Some(ttl) = iter.nth(1) {
-                    if let Ok(ttl) = ttl.parse::<u64>() {
+                match iter.nth(1) {
+                    Some(ttl) => {
+                        let ttl = ttl.parse::<u64>()?;
                         if ttl > now {
                             rt.insert(id, ttl);
                         } else {
                             has_stale = true;
                         }
+                        continue;
                     }
-                    continue;
+                    None => {
+                        break;
+                    }
                 }
             }
             break;
@@ -317,7 +404,7 @@ async fn load_blacklist(
         cli.send(sweep_cmd, None).await?;
     }
 
-    Ok(rt)
+    Ok((cursor, rt))
 }
 
 fn scoped_string(a: &str, b: &str) -> String {
@@ -405,29 +492,51 @@ end
 -- args: <member> <expire duration with millisecond> [<member> <expire duration with millisecond> ...]
 -- return: integer or error
 local function redlist_add(keys, args)
-  local key = '_RL_' .. keys[1]
+  local key_add = '_RLA_' .. keys[1]
+  local key_exp = '_RLE_' .. keys[1]
   local ts = now_ms()
-  redis.call('ZREMRANGEBYSCORE', key, '-inf', '(' .. ts)
-
-  local members = {}
-  for i = 1, #args, 2 do
-    members[i] = ts + (tonumber(args[i + 1]) or 1000)
-    members[i + 1] = args[i]
+  local members = redis.call('ZRANGE', key_exp, '-inf', '(' .. ts, 'BYSCORE')
+  if #members > 0 then
+    redis.call('ZREM', key_add, unpack(members))
+    redis.call('ZREM', key_exp, unpack(members))
   end
 
-  return redis.call('ZADD', key, unpack(members))
+  if #args == 0 then
+    return 0
+  end
+
+  local members_add = {}
+  local members_exp = {}
+  for i = 1, #args, 2 do
+    members_add[i] = ts + i
+    members_add[i + 1] = args[i]
+    members_exp[i] = ts + (tonumber(args[i + 1]) or 1000)
+    members_exp[i + 1] = args[i]
+  end
+
+  redis.call('ZADD', key_exp, unpack(members_exp))
+  return redis.call('ZADD', key_add, unpack(members_add))
 end
 
 -- keys: <redlist key>
--- args: <limit count> <cursor>
--- return: [<member>, <ttl with millisecond> ...] or error
+-- args: <cursor>
+-- return: [<cursor>, <member>, <ttl with millisecond>, <member>, <ttl with millisecond> ...] or error
 local function redlist_scan(keys, args)
-  local key = '_RL_' .. keys[1]
-  local ts = now_ms()
-  local count = tonumber(args[1]) or 100
-  local cursor = tonumber(args[2]) or ts
+  local key_add = '_RLA_' .. keys[1]
+  local key_exp = '_RLE_' .. keys[1]
+  local cursor = tonumber(args[2]) or 0
 
-  local res = redis.call('ZRANGE', key, cursor, -1, 'BYSCORE', 'LIMIT', count, 'WITHSCORES')
+  local res = {}
+  local members = redis.call('ZRANGE', key_add, cursor, 'inf', 'BYSCORE', 'LIMIT', 0, 10000)
+  if #members > 0 then
+    local ttls = redis.call('ZMSCORE', key_exp, unpack(members))
+    table.insert(res, redis.call('ZSCORE', key_add, members[#members]))
+    for i = 1, #members, 1 do
+      table.insert(res, members[i])
+      table.insert(res, ttls[i] or '0')
+    end
+  end
+  return res
 end
 
 -- keys: <redrule key>
@@ -435,17 +544,21 @@ end
 -- return: integer or error
 local function redrules_add(keys, args)
   local key = '_RR_' .. keys[1]
-  local id = args[1] .. args[2]
   local ts = now_ms()
   local members = redis.call('ZRANGE', key, '-inf', '(' .. ts, 'BYSCORE')
   if #members > 0 then
     redis.call('HDEL', key, unpack(members))
   end
 
+  if #args == 0 then
+    return 0
+  end
+
+  local id = args[1] .. args[2]
   local quantity = tonumber(args[3]) or 1
   local ttl = ts + (tonumber(args[4]) or 1000)
   redis.call('ZADD', key, ttl, id)
-  redis.call('HSET', key, id, cjson.encode({args[1], args[2], quantity,  ttl}))
+  return redis.call('HSET', key, id, cjson.encode({args[1], args[2], quantity,  ttl}))
 end
 
 -- keys: <redrules key>
@@ -460,4 +573,5 @@ redis.register_function('redlist_add', redlist_add)
 redis.register_function('redlist_scan', redlist_scan)
 redis.register_function('redrules_add', redrules_add)
 redis.register_function('redrules_all', redrules_all)
+
 "#;

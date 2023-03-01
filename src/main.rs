@@ -44,10 +44,16 @@ async fn main() -> anyhow::Result<()> {
             .app_data(pool.clone())
             .app_data(redrules.clone())
             .wrap(context::ContextTransform {})
+            .service(web::resource("/limiting").route(web::post().to(api::post_limiting)))
             .service(
-                web::resource("/limiting")
-                    .route(web::get().to(api::get_limiting))
-                    .route(web::post().to(api::post_limiting)),
+                web::resource("/redlist")
+                    .route(web::get().to(api::get_redlist))
+                    .route(web::post().to(api::post_redlist)),
+            )
+            .service(
+                web::resource("/redrules")
+                    .route(web::get().to(api::get_redrules))
+                    .route(web::post().to(api::post_redrules)),
             )
             .service(api::version)
     })

@@ -21,5 +21,4 @@ env_logger = "0.10"
 bb8 = "0.8"
 config = { version = "0.13.3", features = ["toml"] }
 json_env_logger2 = { version = "0.2", features = ["iso-timestamps"] }
-chrono = "0.4"
 anyhow = "1.0"

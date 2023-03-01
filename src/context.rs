@@ -1,7 +1,7 @@
 use std::{
     cell::{Ref, RefMut},
     collections::HashMap,
-    time::Instant,
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use actix_utils::future::{ready, Ready};
@@ -10,22 +10,24 @@ use actix_web::{
     error::ErrorInternalServerError,
     Error, HttpMessage, HttpRequest,
 };
-use chrono::{DateTime, Utc};
 use futures_core::future::LocalBoxFuture;
 use serde_json::Value;
 
 pub struct ContextTransform;
 
 pub struct Context {
-    pub time: DateTime<Utc>,
+    pub unix_ms: u64,
     pub start: Instant,
     pub log: HashMap<String, Value>,
 }
 
 impl Context {
     pub fn new() -> Self {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before Unix epoch");
         Context {
-            time: Utc::now(),
+            unix_ms: ts.as_millis() as u64,
             start: Instant::now(),
             log: HashMap::new(),
         }
@@ -97,7 +99,7 @@ where
     fn call(&self, req: ServiceRequest) -> Self::Future {
         let mut ctx = Context::new();
         ctx.log
-            .insert("time".to_string(), Value::from(ctx.time.to_rfc3339()));
+            .insert("timestamp".to_string(), Value::from(ctx.unix_ms));
         ctx.log
             .insert("method".to_string(), Value::from(req.method().as_str()));
         ctx.log.insert("path".to_string(), Value::from(req.path()));
