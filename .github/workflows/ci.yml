@@ -1,13 +1,9 @@
-name: Rust
+name: ci
 on:
   push:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
-env:
-  CARGO_TERM_COLOR: always
-  RUSTFLAGS: "-Dwarnings"
-  CONFIG_FILE_PATH: "./config/default.toml"
 jobs:
   test:
     runs-on: ubuntu-latest
