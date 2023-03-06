@@ -1,4 +1,5 @@
 env = "test"
+namespace = "TEST"
 
 [log]
 level = "info" # debug, info, warn, error

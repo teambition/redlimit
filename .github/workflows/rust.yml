@@ -6,6 +6,8 @@ on:
     branches: [ "main" ]
 env:
   CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-Dwarnings"
+  CONFIG_FILE_PATH: "./config/default.toml"
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -23,5 +25,7 @@ jobs:
           - 6379:6379
     steps:
     - uses: actions/checkout@v3
+    - name: Run clippy
+      run: cargo clippy --all-targets --all-features
     - name: Run tests
       run: cargo test

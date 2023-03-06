@@ -39,6 +39,7 @@ pub struct Rule {
 #[derive(Debug, Deserialize, Clone)]
 pub struct Conf {
     pub env: String,
+    pub namespace: String,
     pub log: Log,
     pub server: Server,
     pub redis: Redis,
@@ -50,9 +51,11 @@ impl Conf {
     pub fn new() -> Result<Self, ConfigError> {
         let file_name =
             std::env::var("CONFIG_FILE_PATH").unwrap_or_else(|_| "./config/default.toml".into());
-        let builder = Config::builder()
-        // .set_default("default", "1")?
-        .add_source(File::new(file_name.as_str(), FileFormat::Toml));
+        Self::from(&file_name)
+    }
+
+    pub fn from(file_name: &str) -> Result<Self, ConfigError> {
+        let builder = Config::builder().add_source(File::new(file_name, FileFormat::Toml));
         builder.build()?.try_deserialize::<Conf>()
     }
 }
@@ -104,8 +107,7 @@ mod tests {
 
     #[actix_rt::test]
     async fn config_from_env_works() -> anyhow::Result<()> {
-        std::env::set_var("CONFIG_FILE_PATH", "./config/test.toml");
-        let cfg = Conf::new()?;
+        let cfg = Conf::from("./config/test.toml")?;
         assert_eq!("test", cfg.env);
         assert_eq!("info", cfg.log.level);
 

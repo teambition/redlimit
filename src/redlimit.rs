@@ -12,31 +12,59 @@ use tokio_util::sync::CancellationToken;
 
 use super::{conf::Rule, redis::RedisPool, redlimit_lua};
 
-pub struct RedRulesData {
+pub struct RedRules {
+    pub ns: NS,
     floor: Vec<u64>,
     defaut: Rule,
     rules: HashMap<String, Rule>,
-    dyn_rules: HashMap<String, (u64, u64)>, // scope:path -> (quantity, ttl)
-    dyn_blacklist: HashMap<String, u64>,    // id -> ttl
-    dyn_blacklist_cursor: u64,
+    dyn_rules: RwLock<DynRedRules>,
 }
 
-pub struct RedRules {
-    inner: RwLock<RedRulesData>,
+pub struct NS(String);
+
+impl NS {
+    pub fn new(namespace: String) -> Self {
+        NS(namespace)
+    }
+
+    pub fn redlist_key(id: &str) -> &str {
+        id
+    }
+
+    pub fn redrules_key(scope: &str, path: &str) -> String {
+        format!("{}:{}", scope, path)
+    }
+
+    pub fn limiting_key(&self, scope: &str, id: &str) -> String {
+        format!("{}:{}:{}", self.0, scope, id)
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+pub struct DynRedRules {
+    redrules: HashMap<String, (u64, u64)>, // ns:scope:path -> (quantity, ttl)
+    redlist: HashMap<String, u64>,         // ns:id -> ttl
+    redlist_cursor: u64,
 }
 
 impl RedRules {
-    pub fn new(rules: &HashMap<String, Rule>) -> Self {
-        let mut rr = RedRulesData {
+    pub fn new(namespace: &str, rules: &HashMap<String, Rule>) -> Self {
+        let mut rr = RedRules {
+            ns: NS::new(namespace.to_string()),
             floor: vec![2, 10000, 1, 1000],
             defaut: Rule {
                 limit: vec![5, 5000, 2, 1000],
                 path: HashMap::new(),
             },
             rules: HashMap::new(),
-            dyn_rules: HashMap::new(),
-            dyn_blacklist: HashMap::new(),
-            dyn_blacklist_cursor: 0,
+            dyn_rules: RwLock::new(DynRedRules {
+                redrules: HashMap::new(),
+                redlist: HashMap::new(),
+                redlist_cursor: 0,
+            }),
         };
 
         for (scope, rule) in rules {
@@ -48,15 +76,13 @@ impl RedRules {
                 }
             }
         }
-        RedRules {
-            inner: RwLock::new(rr),
-        }
+        rr
     }
 
     pub async fn redlist(&self, now: u64) -> HashMap<String, u64> {
-        let rr = self.inner.read().await;
+        let dr = self.dyn_rules.read().await;
         let mut redlist = HashMap::new();
-        for (k, v) in &rr.dyn_blacklist {
+        for (k, v) in &dr.redlist {
             if *v >= now {
                 redlist.insert(k.clone(), *v);
             }
@@ -65,9 +91,9 @@ impl RedRules {
     }
 
     pub async fn redrules(&self, now: u64) -> HashMap<String, (u64, u64)> {
-        let rr = self.inner.read().await;
+        let dr = self.dyn_rules.read().await;
         let mut redrules = HashMap::new();
-        for (k, v) in &rr.dyn_rules {
+        for (k, v) in &dr.redrules {
             if v.1 >= now {
                 redrules.insert(k.clone(), *v);
             }
@@ -76,15 +102,19 @@ impl RedRules {
     }
 
     pub async fn limit_args(&self, now: u64, scope: &str, path: &str, id: &str) -> LimitArgs {
-        let rr = self.inner.read().await;
-        if let Some(ttl) = rr.dyn_blacklist.get(id) {
+        if id.is_empty() {
+            return LimitArgs::new(0, &vec![]);
+        }
+
+        let dr = self.dyn_rules.read().await;
+        if let Some(ttl) = dr.redlist.get(NS::redlist_key(id)) {
             if *ttl >= now {
-                return LimitArgs::new(1, &rr.floor);
+                return LimitArgs::new(1, &self.floor);
             }
         }
 
-        let rule = rr.rules.get(scope).unwrap_or(&rr.defaut);
-        if let Some((quantity, ttl)) = rr.dyn_rules.get(&scoped_string(scope, path)) {
+        let rule = self.rules.get(scope).unwrap_or(&self.defaut);
+        if let Some((quantity, ttl)) = dr.redrules.get(&NS::redrules_key(scope, path)) {
             if *ttl >= now {
                 return LimitArgs::new(*quantity, &rule.limit);
             }
@@ -97,24 +127,24 @@ impl RedRules {
     pub async fn dyn_update(
         &self,
         now: u64,
-        dyn_blacklist_cursor: u64,
-        dyn_blacklist: HashMap<String, u64>,
-        dyn_rules: HashMap<String, (u64, u64)>,
+        redlist_cursor: u64,
+        redlist: HashMap<String, u64>,
+        redrules: HashMap<String, (u64, u64)>,
     ) {
-        let mut rr = self.inner.write().await;
-        rr.dyn_blacklist_cursor = dyn_blacklist_cursor;
+        let mut dr = self.dyn_rules.write().await;
+        dr.redlist_cursor = redlist_cursor;
 
-        rr.dyn_blacklist.retain(|_, v| *v > now);
-        for (k, v) in dyn_blacklist {
+        dr.redlist.retain(|_, v| *v > now);
+        for (k, v) in redlist {
             if v > now {
-                rr.dyn_blacklist.insert(k, v);
+                dr.redlist.insert(k, v);
             }
         }
 
-        rr.dyn_rules.retain(|_, v| v.1 > now);
-        for (k, v) in dyn_rules {
+        dr.redrules.retain(|_, v| v.1 > now);
+        for (k, v) in redrules {
             if v.1 > now {
-                rr.dyn_rules.insert(k, v);
+                dr.redrules.insert(k, v);
             }
         }
     }
@@ -148,33 +178,35 @@ impl LimitArgs {
         }
         args
     }
+
+    pub fn is_valid(&self) -> bool {
+        self.0 > 0
+            && self.0 <= self.1
+            && self.2 > 0
+            && self.2 <= 60 * 1000
+            && (self.3 == 0 || self.0 <= self.3)
+            && (self.4 == 0 || self.4 <= self.2)
+    }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, PartialEq, Debug)]
 // LimitResult.0: request count;
 // LimitResult.1: 0: not limited, > 0: limited, milliseconds to wait;
 pub struct LimitResult(pub u64, pub u64);
 
 pub async fn limiting(
     pool: web::Data<RedisPool>,
-    scope: &str,
-    id: &str,
+    limiting_key: &str,
     args: LimitArgs,
 ) -> Result<LimitResult> {
-    if id.is_empty()
-        || args.0 == 0 // 0 quantity
-        || args.0 > args.1 // quantity > max count per period
-        || args.2 > 60 * 1000 // period > 60s
-        || (args.3 > 0 && args.0 > args.3)
-    // max burst > 0 && quantity > max burst
-    {
+    if !args.is_valid() {
         return Ok(LimitResult(0, 0));
     }
 
     let mut cmd = resp::cmd("FCALL")
         .arg("limiting")
         .arg(1)
-        .arg(scoped_string(scope, id))
+        .arg(limiting_key.to_string())
         .arg(args.0)
         .arg(args.1)
         .arg(args.2);
@@ -193,26 +225,9 @@ pub async fn limiting(
     Ok(LimitResult(0, 0))
 }
 
-pub async fn redlist_add(pool: web::Data<RedisPool>, args: HashMap<String, u64>) -> Result<()> {
-    if args.is_empty() {
-        return Ok(());
-    }
-
-    let mut cmd = resp::cmd("FCALL")
-        .arg("redlist_add")
-        .arg(1)
-        .arg("dyn_blacklist");
-
-    for (k, v) in args {
-        cmd = cmd.arg(k).arg(v);
-    }
-
-    pool.get().await?.send(cmd, None).await?;
-    Ok(())
-}
-
 pub async fn redrules_add(
     pool: web::Data<RedisPool>,
+    ns: &str,
     scope: &str,
     rules: &HashMap<String, (u64, u64)>,
 ) -> Result<()> {
@@ -222,7 +237,7 @@ pub async fn redrules_add(
             let cmd = resp::cmd("FCALL")
                 .arg("redrules_add")
                 .arg(1)
-                .arg("dyn_rules")
+                .arg(ns.to_string())
                 .arg(scope.to_string())
                 .arg(k.clone())
                 .arg(v.0)
@@ -233,10 +248,32 @@ pub async fn redrules_add(
     Ok(())
 }
 
-pub async fn load_fn(pool: web::Data<RedisPool>) -> Result<()> {
+pub async fn redlist_add(
+    pool: web::Data<RedisPool>,
+    ns: &str,
+    list: HashMap<String, u64>,
+) -> Result<()> {
+    if !list.is_empty() {
+        let mut cli = pool.get().await?;
+        let mut cmd = resp::cmd("FCALL")
+            .arg("redlist_add")
+            .arg(1)
+            .arg(ns.to_string());
+
+        for (k, v) in list {
+            cmd = cmd.arg(k).arg(v);
+        }
+
+        cli.send(cmd, None).await?;
+    }
+    Ok(())
+}
+
+pub async fn init_redlimit_fn(pool: web::Data<RedisPool>) -> Result<()> {
     let cmd = resp::cmd("FUNCTION")
         .arg("LOAD")
         .arg(redlimit_lua::REDLIMIT);
+
     let data = pool.get().await?.send(cmd, None).await?;
     if data.is_error() {
         let err = data.to_string();
@@ -247,13 +284,13 @@ pub async fn load_fn(pool: web::Data<RedisPool>) -> Result<()> {
     Ok(())
 }
 
-pub fn init_redrules_sync(
+pub fn init_redlimit_sync(
     pool: web::Data<RedisPool>,
     redrules: web::Data<RedRules>,
 ) -> (JoinHandle<()>, CancellationToken) {
     let cancel_redrules_sync = CancellationToken::new();
     (
-        tokio::spawn(spawn_redrules_sync(
+        tokio::spawn(spawn_redlimit_sync(
             pool,
             redrules,
             cancel_redrules_sync.clone(),
@@ -262,33 +299,33 @@ pub fn init_redrules_sync(
     )
 }
 
-async fn spawn_redrules_sync(
+async fn spawn_redlimit_sync(
     pool: web::Data<RedisPool>,
     redrules: web::Data<RedRules>,
     stop_signal: CancellationToken,
 ) {
     loop {
-        log::info!("starting redrules sync job");
+        log::info!("starting redlimit sync job");
 
-        let cursor = redrules.inner.read().await.dyn_blacklist_cursor;
+        let cursor = redrules.dyn_rules.read().await.redlist_cursor;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time before Unix epoch")
             .as_millis() as u64;
 
-        let dyn_rules = load_redrules(pool.clone(), now)
+        let dyn_rules = redrules_load(pool.clone(), redrules.ns.as_str(), now)
             .await
-            .map_err(|e| log::error!("load_redrules error: {}", e))
+            .map_err(|e| log::error!("redrules_load error: {}", e))
             .unwrap_or(HashMap::new());
 
-        let dyn_blacklist = load_blacklist(pool.clone(), now, cursor)
+        let dyn_list = redlist_load(pool.clone(), redrules.ns.as_str(), now, cursor)
             .await
-            .map_err(|e| log::error!("load_blacklist error: {}", e))
+            .map_err(|e| log::error!("redlist_load error: {}", e))
             .unwrap_or((cursor, HashMap::new()));
 
-        if !dyn_rules.is_empty() || !dyn_blacklist.1.is_empty() {
+        if !dyn_rules.is_empty() || !dyn_list.1.is_empty() {
             redrules
-                .dyn_update(now, dyn_blacklist.0, dyn_blacklist.1, dyn_rules)
+                .dyn_update(now, dyn_list.0, dyn_list.1, dyn_rules)
                 .await;
         }
 
@@ -298,7 +335,7 @@ async fn spawn_redrules_sync(
             }
 
             _ = stop_signal.cancelled() => {
-                log::info!("gracefully shutting down redrules sync job");
+                log::info!("gracefully shutting down redlimit sync job");
                 break;
             }
         };
@@ -308,15 +345,16 @@ async fn spawn_redrules_sync(
 #[derive(Deserialize)]
 struct RedRuleEntry(String, String, u64, u64);
 
-async fn load_redrules(
+async fn redrules_load(
     pool: web::Data<RedisPool>,
+    ns: &str,
     now: u64,
 ) -> anyhow::Result<HashMap<String, (u64, u64)>> {
     let mut cli = pool.get().await?;
     let redrules_cmd = resp::cmd("FCALL")
         .arg("redrules_all")
         .arg(1)
-        .arg("dyn_rules");
+        .arg(ns.to_string());
 
     let data = cli.send(redrules_cmd, None).await?.to::<Vec<String>>()?;
     let mut rt: HashMap<String, (u64, u64)> = HashMap::new();
@@ -324,7 +362,7 @@ async fn load_redrules(
     for s in data {
         if let Ok(v) = serde_json::from_str::<RedRuleEntry>(&s) {
             if v.3 > now {
-                rt.insert(scoped_string(&v.0, &v.1), (v.2, v.3));
+                rt.insert(NS::redrules_key(&v.0, &v.1), (v.2, v.3));
             } else {
                 has_stale = true
             }
@@ -335,7 +373,7 @@ async fn load_redrules(
         let sweep_cmd = resp::cmd("FCALL")
             .arg("redrules_add")
             .arg(1)
-            .arg("dyn_rules");
+            .arg(ns.to_string());
         cli.send(sweep_cmd, None).await?;
     }
 
@@ -343,8 +381,9 @@ async fn load_redrules(
 }
 
 const REDLIST_SCAN_COUNT: usize = 10000;
-async fn load_blacklist(
+async fn redlist_load(
     pool: web::Data<RedisPool>,
+    ns: &str,
     now: u64,
     cursor: u64,
 ) -> anyhow::Result<(u64, HashMap<String, u64>)> {
@@ -357,7 +396,7 @@ async fn load_blacklist(
         let blacklist_cmd = resp::cmd("FCALL")
             .arg("redlist_scan")
             .arg(1)
-            .arg("dyn_blacklist")
+            .arg(ns.to_string())
             .arg(cursor);
 
         let data = cli.send(blacklist_cmd, None).await?.to::<Vec<String>>()?;
@@ -407,24 +446,22 @@ async fn load_blacklist(
         let sweep_cmd = resp::cmd("FCALL")
             .arg("redlist_add")
             .arg(1)
-            .arg("dyn_blacklist");
+            .arg(ns.to_string());
         cli.send(sweep_cmd, None).await?;
     }
 
     Ok((cursor, rt))
 }
 
-fn scoped_string(a: &str, b: &str) -> String {
-    let mut s = String::from(a);
-    s.push(':');
-    s.push_str(b);
-    s
-}
-
 #[cfg(test)]
 mod tests {
 
-    use super::{super::conf, *};
+    use actix_web::web;
+
+    use super::{
+        super::{conf, redis},
+        *,
+    };
 
     #[actix_rt::test]
     async fn limit_args_works() -> anyhow::Result<()> {
@@ -457,21 +494,18 @@ mod tests {
 
     #[actix_rt::test]
     async fn red_rules_works() -> anyhow::Result<()> {
-        std::env::set_var("CONFIG_FILE_PATH", "./config/test.toml");
-
         let cfg = conf::Conf::new()?;
-        let redrules = RedRules::new(&cfg.rules);
+        let redrules = RedRules::new(&cfg.namespace, &cfg.rules);
 
         {
-            let rr = redrules.inner.read().await;
-            assert_eq!(vec![3, 10000, 1, 1000], rr.floor);
+            assert_eq!(vec![3, 10000, 1, 1000], redrules.floor);
 
-            assert_eq!(vec![10, 10000, 3, 1000], rr.defaut.limit);
-            assert!(rr.defaut.path.is_empty());
+            assert_eq!(vec![10, 10000, 3, 1000], redrules.defaut.limit);
+            assert!(redrules.defaut.path.is_empty());
 
-            assert_eq!(0, rr.dyn_blacklist_cursor);
+            assert_eq!(0, redrules.dyn_rules.read().await.redlist_cursor);
 
-            let core_rules = rr
+            let core_rules = redrules
                 .rules
                 .get("core")
                 .ok_or(anyhow::Error::msg("'core' not exists"))?;
@@ -485,7 +519,7 @@ mod tests {
                     .to_owned()
             );
 
-            assert!(rr.rules.get("core2").is_none());
+            assert!(redrules.rules.get("core2").is_none());
         }
 
         {
@@ -535,8 +569,8 @@ mod tests {
                 .await;
 
             {
-                let rr = redrules.inner.read().await;
-                assert_eq!(1, rr.dyn_blacklist_cursor);
+                let dr = redrules.dyn_rules.read().await;
+                assert_eq!(1, dr.redlist_cursor);
             }
 
             assert_eq!(1, redrules.redlist(0).await.len());
@@ -581,8 +615,8 @@ mod tests {
             redrules.dyn_update(ts, 2, HashMap::new(), dyn_rules).await;
 
             {
-                let rr = redrules.inner.read().await;
-                assert_eq!(2, rr.dyn_blacklist_cursor);
+                let dr = redrules.dyn_rules.read().await;
+                assert_eq!(2, dr.redlist_cursor);
             }
 
             assert_eq!(1, redrules.redlist(0).await.len());
@@ -641,8 +675,8 @@ mod tests {
                 .await;
 
             {
-                let rr = redrules.inner.read().await;
-                assert_eq!(ts, rr.dyn_blacklist_cursor);
+                let dr = redrules.dyn_rules.read().await;
+                assert_eq!(ts, dr.redlist_cursor);
             }
 
             assert!(
@@ -663,8 +697,8 @@ mod tests {
                 .await;
 
             {
-                let rr = redrules.inner.read().await;
-                assert_eq!(ts + 1, rr.dyn_blacklist_cursor);
+                let dr = redrules.dyn_rules.read().await;
+                assert_eq!(ts + 1, dr.redlist_cursor);
             }
 
             assert!(redrules.redlist(0).await.is_empty());
@@ -674,6 +708,114 @@ mod tests {
                 "stale rules should not be added"
             );
         }
+
+        Ok(())
+    }
+
+    #[actix_rt::test]
+    async fn init_redlimit_fn_works() -> anyhow::Result<()> {
+        let cfg = conf::Conf::new()?;
+        let pool = web::Data::new(redis::new(cfg.redis.clone()).await?);
+
+        assert!(init_redlimit_fn(pool.clone()).await.is_ok());
+        assert!(init_redlimit_fn(pool.clone()).await.is_ok());
+
+        Ok(())
+    }
+
+    #[actix_rt::test]
+    async fn limiting_works() -> anyhow::Result<()> {
+        let cfg = conf::Conf::new()?;
+        let pool = web::Data::new(redis::new(cfg.redis.clone()).await?);
+
+        let res = limiting(pool.clone(), "TT:core:user1", LimitArgs(1, 8, 1000, 5, 300)).await?;
+        assert_eq!(LimitResult(1, 0), res);
+
+        let res = limiting(pool.clone(), "TT:core:user1", LimitArgs(3, 8, 1000, 5, 300)).await?;
+        assert_eq!(LimitResult(4, 0), res);
+
+        let res = limiting(pool.clone(), "TT:core:user1", LimitArgs(3, 8, 1000, 5, 300)).await?;
+        assert_eq!(4, res.0);
+        assert!(res.1 > 0);
+
+        sleep(Duration::from_millis(res.1 + 1)).await;
+        let res = limiting(pool.clone(), "TT:core:user1", LimitArgs(3, 8, 1000, 5, 300)).await?;
+        assert_eq!(LimitResult(7, 0), res);
+
+        let res = limiting(pool.clone(), "TT:core:user1", LimitArgs(2, 8, 1000, 5, 300)).await?;
+        assert_eq!(7, res.0);
+        assert!(res.1 > 0);
+
+        let res = limiting(pool.clone(), "TT:core:user1", LimitArgs(1, 8, 1000, 5, 300)).await?;
+        assert_eq!(LimitResult(8, 0), res);
+
+        let res = limiting(pool.clone(), "TT:core:user1", LimitArgs(1, 8, 1000, 5, 300)).await?;
+        assert_eq!(8, res.0);
+        assert!(res.1 > 0);
+
+        sleep(Duration::from_millis(res.1 + 1)).await;
+        let res = limiting(pool.clone(), "TT:core:user1", LimitArgs(1, 8, 1000, 5, 300)).await?;
+        assert_eq!(LimitResult(1, 0), res);
+
+        let res = limiting(pool.clone(), "TT:core:user1", LimitArgs(1, 1, 1000, 5, 300)).await?;
+        assert_eq!(1, res.0);
+        assert!(res.1 > 0, "with new max count");
+
+        Ok(())
+    }
+
+    #[actix_rt::test]
+    async fn redrules_add_load_works() -> anyhow::Result<()> {
+        let ns = "redrules_add_load_works";
+        let cfg = conf::Conf::new()?;
+        let pool = web::Data::new(redis::new(cfg.redis.clone()).await?);
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before Unix epoch")
+            .as_millis() as u64;
+
+        let dyn_redrules = redrules_load(pool.clone(), ns, ts).await?;
+        assert!(dyn_redrules.is_empty());
+
+        let mut rules = HashMap::new();
+        redrules_add(pool.clone(), ns, "core", &rules).await?;
+        let dyn_redrules = redrules_load(pool.clone(), ns, ts).await?;
+        assert!(dyn_redrules.is_empty());
+
+        rules.insert("path1".to_owned(), (2, 100));
+        redrules_add(pool.clone(), ns, "core", &rules).await?;
+        let dyn_redrules = redrules_load(pool.clone(), ns, ts).await?;
+        assert_eq!(1, dyn_redrules.len());
+
+        redrules_add(pool.clone(), ns, "core2", &rules).await?;
+        let dyn_redrules = redrules_load(pool.clone(), ns, ts).await?;
+        assert_eq!(2, dyn_redrules.len());
+
+        let rt = dyn_redrules
+            .get("core:path1")
+            .ok_or(anyhow::Error::msg("'core:path1' not exists"))?
+            .to_owned();
+        assert_eq!(2, rt.0);
+        assert!(rt.1 > ts);
+
+        let rt = dyn_redrules
+            .get("core2:path1")
+            .ok_or(anyhow::Error::msg("'core2:path1' not exists"))?
+            .to_owned();
+        assert_eq!(2, rt.0);
+        assert!(rt.1 > ts);
+
+        let dyn_redrules = redrules_load(pool.clone(), ns, ts + 210).await?;
+        assert_eq!(0, dyn_redrules.len());
+
+        let dyn_redrules = redrules_load(pool.clone(), ns, ts).await?;
+        assert_eq!(2, dyn_redrules.len());
+
+        sleep(Duration::from_millis(210)).await;
+        let dyn_redrules = redrules_load(pool.clone(), ns, ts + 210).await?;
+        assert_eq!(0, dyn_redrules.len());
+        let dyn_redrules = redrules_load(pool.clone(), ns, ts).await?;
+        assert_eq!(0, dyn_redrules.len());
 
         Ok(())
     }

@@ -1,4 +1,5 @@
 env = "development"
+namespace = "RL"
 
 [log]
 level = "debug" # debug, info, warn, error

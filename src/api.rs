@@ -50,7 +50,7 @@ pub async fn post_limiting(
 
     let rt = match timeout(
         Duration::from_millis(100),
-        redlimit::limiting(pool, &input.scope, &input.id, args),
+        redlimit::limiting(pool, &rules.ns.limiting_key(&input.scope, &input.id), args),
     )
     .await
     {
@@ -88,9 +88,10 @@ pub async fn get_redlist(
 
 pub async fn post_redlist(
     pool: web::Data<RedisPool>,
+    rules: web::Data<RedRules>,
     input: web::Json<HashMap<String, u64>>,
 ) -> Result<HttpResponse, Error> {
-    if let Err(err) = redlimit::redlist_add(pool, input.into_inner()).await {
+    if let Err(err) = redlimit::redlist_add(pool, rules.ns.as_str(), input.into_inner()).await {
         log::error!("redlist_add error: {}", err);
         return respond_error(500, err.to_string());
     }
@@ -115,10 +116,13 @@ pub struct RedRulesRequest {
 
 pub async fn post_redrules(
     pool: web::Data<RedisPool>,
+    rules: web::Data<RedRules>,
     input: web::Json<RedRulesRequest>,
 ) -> Result<HttpResponse, Error> {
     let input = input.into_inner();
-    if let Err(err) = redlimit::redrules_add(pool, &input.scope, &input.rules).await {
+    if let Err(err) =
+        redlimit::redrules_add(pool, rules.ns.as_str(), &input.scope, &input.rules).await
+    {
         log::error!("redlist_add error: {}", err);
         return respond_error(500, err.to_string());
     }

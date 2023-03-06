@@ -76,45 +76,45 @@ end
 -- args: <member> <expire duration with millisecond> [<member> <expire duration with millisecond> ...]
 -- return: integer or error
 local function redlist_add(keys, args)
-  local key_add = '_RLA_' .. keys[1]
-  local key_exp = '_RLE_' .. keys[1]
+  local cursor_key = keys[1] .. ':LC'
+  local ttl_key = keys[1] .. ':LT'
   local ts = now_ms()
-  local members = redis.call('ZRANGE', key_exp, '-inf', '(' .. ts, 'BYSCORE')
+  local members = redis.call('ZRANGE', ttl_key, '-inf', '(' .. ts, 'BYSCORE')
   if #members > 0 then
-    redis.call('ZREM', key_add, unpack(members))
-    redis.call('ZREM', key_exp, unpack(members))
+    redis.call('ZREM', ttl_key, unpack(members))
+    redis.call('ZREM', cursor_key, unpack(members))
   end
 
   if #args == 0 then
     return 0
   end
 
-  local members_add = {}
-  local members_exp = {}
+  local cursor_members = {}
+  local ttl_members = {}
   for i = 1, #args, 2 do
-    members_add[i] = ts + i
-    members_add[i + 1] = args[i]
-    members_exp[i] = ts + (tonumber(args[i + 1]) or 1000)
-    members_exp[i + 1] = args[i]
+    cursor_members[i] = ts + i
+    cursor_members[i + 1] = args[i]
+    ttl_members[i] = ts + (tonumber(args[i + 1]) or 1000)
+    ttl_members[i + 1] = args[i]
   end
 
-  redis.call('ZADD', key_exp, unpack(members_exp))
-  return redis.call('ZADD', key_add, unpack(members_add))
+  redis.call('ZADD', ttl_key, unpack(ttl_members))
+  return redis.call('ZADD', cursor_key, unpack(cursor_members))
 end
 
 -- keys: <redlist key>
 -- args: <cursor>
 -- return: [<cursor>, <member>, <ttl with millisecond>, <member>, <ttl with millisecond> ...] or error
 local function redlist_scan(keys, args)
-  local key_add = '_RLA_' .. keys[1]
-  local key_exp = '_RLE_' .. keys[1]
+  local cursor_key = keys[1] .. ':LC'
+  local ttl_key = keys[1] .. ':LT'
   local cursor = tonumber(args[2]) or 0
 
   local res = {}
-  local members = redis.call('ZRANGE', key_add, cursor, 'inf', 'BYSCORE', 'LIMIT', 0, 10000)
+  local members = redis.call('ZRANGE', cursor_key, cursor, 'inf', 'BYSCORE', 'LIMIT', 0, 10000)
   if #members > 0 then
-    local ttls = redis.call('ZMSCORE', key_exp, unpack(members))
-    table.insert(res, redis.call('ZSCORE', key_add, members[#members]))
+    local ttls = redis.call('ZMSCORE', ttl_key, unpack(members))
+    table.insert(res, redis.call('ZSCORE', cursor_key, members[#members]))
     for i = 1, #members, 1 do
       table.insert(res, members[i])
       table.insert(res, ttls[i] or '0')
@@ -127,11 +127,13 @@ end
 -- args: <scope> <path> <quantity> <expire duration with millisecond>
 -- return: integer or error
 local function redrules_add(keys, args)
-  local key = '_RR_' .. keys[1]
+  local ttl_key = keys[1] .. ':RT'
+  local data_key = keys[1] .. ':RD'
   local ts = now_ms()
-  local members = redis.call('ZRANGE', key, '-inf', '(' .. ts, 'BYSCORE')
+  local members = redis.call('ZRANGE', ttl_key, '-inf', '(' .. ts, 'BYSCORE')
   if #members > 0 then
-    redis.call('HDEL', key, unpack(members))
+    redis.call('HDEL', ttl_key, unpack(members))
+    redis.call('ZREM', data_key, unpack(members))
   end
 
   if #args == 0 then
@@ -141,15 +143,15 @@ local function redrules_add(keys, args)
   local id = args[1] .. args[2]
   local quantity = tonumber(args[3]) or 1
   local ttl = ts + (tonumber(args[4]) or 1000)
-  redis.call('ZADD', key, ttl, id)
-  return redis.call('HSET', key, id, cjson.encode({args[1], args[2], quantity,  ttl}))
+  redis.call('ZADD', ttl_key, ttl, id)
+  return redis.call('HSET', data_key, id, cjson.encode({args[1], args[2], quantity,  ttl}))
 end
 
 -- keys: <redrules key>
 -- return: array or error
 local function redrules_all(keys, args)
-  local key = '_RR_' .. keys[1]
-  return redis.call('HVALS', key)
+  local data_key = keys[1] .. ':RD'
+  return redis.call('HVALS', data_key)
 end
 
 redis.register_function('limiting', limiting)

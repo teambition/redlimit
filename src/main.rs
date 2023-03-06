@@ -27,15 +27,15 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or_else(|err| panic!("redis connection pool error: {}", err)),
     );
 
-    if let Err(err) = redlimit::load_fn(pool.clone()).await {
+    if let Err(err) = redlimit::init_redlimit_fn(pool.clone()).await {
         panic!("redis FUNCTION error: {}", err)
     }
 
-    let redrules = web::Data::new(redlimit::RedRules::new(&cfg.rules));
+    let redrules = web::Data::new(redlimit::RedRules::new(&cfg.namespace, &cfg.rules));
 
     // background jobs relating to local, disposable tasks
-    let (redrules_sync_handle, cancel_redrules_sync) =
-        redlimit::init_redrules_sync(pool.clone(), redrules.clone());
+    let (redlimit_sync_handle, cancel_redlimit_sync) =
+        redlimit::init_redlimit_sync(pool.clone(), redrules.clone());
 
     let server = HttpServer::new(move || {
         App::new()
@@ -71,8 +71,8 @@ async fn main() -> anyhow::Result<()> {
         server.bind_rustls(addr, config)?.run().await?;
     }
 
-    cancel_redrules_sync.cancel();
-    redrules_sync_handle.await.unwrap();
+    cancel_redlimit_sync.cancel();
+    redlimit_sync_handle.await.unwrap();
     log::info!("redlimit service shutdown gracefully");
 
     Ok(())
