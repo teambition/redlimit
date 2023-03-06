@@ -16,7 +16,7 @@ username = ""
 password = ""
 
 [job]
-interval = 3 # seconds
+interval = 1 # seconds
 
 [rules."*"] # default rule
 # <max count per period> <period with millisecond> <max burst> <burst period with millisecond>

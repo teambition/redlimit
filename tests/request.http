@@ -1,0 +1,44 @@
+# REST Client https://github.com/Huachao/vscode-restclient
+
+###
+GET http://127.0.0.1:8080/version
+Accept: application/json
+
+###
+GET http://127.0.0.1:8080/redlist
+Accept: application/json
+
+###
+POST http://127.0.0.1:8080/redlist
+Content-Type: application/json
+
+{
+  "user1": 5000,
+  "user2": 120000
+}
+
+###
+GET http://127.0.0.1:8080/redrules
+Accept: application/json
+
+###
+POST http://127.0.0.1:8080/redrules
+Content-Type: application/json
+
+{
+  "scope": "core",
+  "rules": {
+    "POST /v1/file/list": [10, 10000],
+    "POST /v2/file/list": [8, 20000]
+  }
+}
+
+###
+POST http://127.0.0.1:8080/limiting
+Content-Type: application/json
+
+{
+  "scope": "core",
+  "path": "POST /v1/file/list",
+  "id": "user123"
+}

@@ -108,7 +108,7 @@ end
 local function redlist_scan(keys, args)
   local cursor_key = keys[1] .. ':LC'
   local ttl_key = keys[1] .. ':LT'
-  local cursor = tonumber(args[2]) or 0
+  local cursor = tonumber(args[1]) or 0
 
   local res = {}
   local members = redis.call('ZRANGE', cursor_key, cursor, 'inf', 'BYSCORE', 'LIMIT', 0, 10000)
@@ -132,8 +132,8 @@ local function redrules_add(keys, args)
   local ts = now_ms()
   local members = redis.call('ZRANGE', ttl_key, '-inf', '(' .. ts, 'BYSCORE')
   if #members > 0 then
-    redis.call('HDEL', ttl_key, unpack(members))
-    redis.call('ZREM', data_key, unpack(members))
+    redis.call('HDEL', data_key, unpack(members))
+    redis.call('ZREM', ttl_key, unpack(members))
   end
 
   if #args == 0 then

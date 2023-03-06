@@ -34,7 +34,7 @@ mod tests {
 
     use super::{super::conf, *};
 
-    #[actix_rt::test]
+    #[actix_web::test]
     async fn redis_pool_works() -> anyhow::Result<()> {
         let pool = new(conf::Redis {
             host: "127.0.0.1".to_string(),

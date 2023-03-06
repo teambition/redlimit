@@ -35,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
 
     // background jobs relating to local, disposable tasks
     let (redlimit_sync_handle, cancel_redlimit_sync) =
-        redlimit::init_redlimit_sync(pool.clone(), redrules.clone());
+        redlimit::init_redlimit_sync(pool.clone(), redrules.clone(), cfg.job.interval);
 
     let server = HttpServer::new(move || {
         App::new()
@@ -56,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
                     .route(web::get().to(api::get_redrules))
                     .route(web::post().to(api::post_redrules)),
             )
-            .service(api::version)
+            .route("/version", web::get().to(api::version))
     })
     .workers(2)
     .keep_alive(Duration::from_secs(25))

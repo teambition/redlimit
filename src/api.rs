@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use actix_web::{get, http::StatusCode, web, Error, HttpRequest, HttpResponse};
+use actix_web::{http::StatusCode, web, Error, HttpRequest, HttpResponse};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, to_value, Value};
 use tokio::time::{timeout, Duration};
@@ -12,7 +12,6 @@ pub struct AppInfo {
     pub version: String,
 }
 
-#[get("/version")]
 pub async fn version(
     req: HttpRequest,
     info: web::Data<AppInfo>,
@@ -36,6 +35,14 @@ pub struct LimitRequest {
     id: String,
 }
 
+#[derive(Serialize)]
+pub struct LimitResponse {
+    limit: u64,     // x-ratelimit-limit
+    remaining: u64, // x-ratelimit-remaining
+    reset: u64,     // x-ratelimit-reset
+    retry: u64,     // retry-after delay-milliseconds
+}
+
 pub async fn post_limiting(
     req: HttpRequest,
     pool: web::Data<RedisPool>,
@@ -47,6 +54,7 @@ pub async fn post_limiting(
     let args = rules
         .limit_args(ts, &input.scope, &input.path, &input.id)
         .await;
+    let limit = args.1;
 
     let rt = match timeout(
         Duration::from_millis(100),
@@ -61,7 +69,7 @@ pub async fn post_limiting(
     let rt = match rt {
         Ok(rt) => rt,
         Err(err) => {
-            log::error!("post_limiting error: {}", err);
+            log::warn!("post_limiting error: {}", err);
             redlimit::LimitResult(0, 0)
         }
     };
@@ -74,7 +82,12 @@ pub async fn post_limiting(
     ctx.log.insert("count".to_string(), Value::from(rt.0));
     ctx.log.insert("limited".to_string(), Value::from(rt.1 > 0));
 
-    respond_result(rt)
+    respond_result(LimitResponse {
+        limit,
+        remaining: if limit > rt.0 { limit - rt.0 } else { 0 },
+        reset: if rt.1 > 0 { (ts + rt.1) / 1000 } else { 0 },
+        retry: rt.1,
+    })
 }
 
 pub async fn get_redlist(
@@ -91,7 +104,7 @@ pub async fn post_redlist(
     rules: web::Data<RedRules>,
     input: web::Json<HashMap<String, u64>>,
 ) -> Result<HttpResponse, Error> {
-    if let Err(err) = redlimit::redlist_add(pool, rules.ns.as_str(), input.into_inner()).await {
+    if let Err(err) = redlimit::redlist_add(pool, rules.ns.as_str(), &input.into_inner()).await {
         log::error!("redlist_add error: {}", err);
         return respond_error(500, err.to_string());
     }
@@ -144,4 +157,35 @@ fn respond_error(code: u16, err_msg: String) -> Result<HttpResponse, Error> {
     Ok(HttpResponse::build(StatusCode::from_u16(code).unwrap())
         .content_type("application/json")
         .json(err_json))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use actix_web::{http::header::ContentType, test, App};
+
+    #[actix_web::test]
+    async fn get_version_works() -> anyhow::Result<()> {
+        let cfg = super::super::conf::Conf::new()?;
+        let pool = web::Data::new(super::super::redis::new(cfg.redis.clone()).await?);
+        let info = web::Data::new(AppInfo {
+            version: String::from("v0.1.0"),
+        });
+
+        let app = test::init_service(
+            App::new()
+                .app_data(pool.clone())
+                .app_data(info.clone())
+                .wrap(super::super::context::ContextTransform {})
+                .route("/", web::get().to(version)),
+        )
+        .await;
+        let req = test::TestRequest::default()
+            .insert_header(ContentType::json())
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert!(resp.status().is_success());
+
+        Ok(())
+    }
 }

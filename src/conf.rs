@@ -64,7 +64,7 @@ impl Conf {
 mod tests {
     use super::*;
 
-    #[actix_rt::test]
+    #[actix_web::test]
     async fn config_works() -> anyhow::Result<()> {
         let cfg = Conf::new()?;
         assert_eq!("development", cfg.env);
@@ -105,7 +105,7 @@ mod tests {
         Ok(())
     }
 
-    #[actix_rt::test]
+    #[actix_web::test]
     async fn config_from_env_works() -> anyhow::Result<()> {
         let cfg = Conf::from("./config/test.toml")?;
         assert_eq!("test", cfg.env);

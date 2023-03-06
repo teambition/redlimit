@@ -9,7 +9,7 @@ env:
   RUSTFLAGS: "-Dwarnings"
   CONFIG_FILE_PATH: "./config/default.toml"
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
     services:
       # Label used to access the service container
