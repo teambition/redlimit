@@ -38,6 +38,8 @@ jobs:
         images: |
           ${{ secrets.DOCKERHUB_USERNAME }}/redlimit
           ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=semver,pattern={{raw}}
 
     - name: Build and push Docker image
       uses: docker/build-push-action@v4
