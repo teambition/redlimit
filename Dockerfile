@@ -11,10 +11,10 @@ RUN cargo build --release
 FROM --platform=$BUILDPLATFORM ubuntu:latest
 RUN ln -snf /usr/share/zoneinfo/$CONTAINER_TIMEZONE /etc/localtime && echo $CONTAINER_TIMEZONE > /etc/timezone
 RUN apt-get update \
-    && apt-get install -y bash curl ca-certificates tzdata locales extra-runtime-dependencies \
+    && apt-get install -y bash curl ca-certificates tzdata locales \
     && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-	  && localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8
+    && localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8
 ENV LANG en_US.utf8
 
 WORKDIR /app
