@@ -16,9 +16,8 @@ mod redlimit_lua;
 async fn main() -> anyhow::Result<()> {
     let cfg = conf::Conf::new().unwrap_or_else(|err| panic!("config error: {}", err));
 
-    std::env::set_var("RUST_LOG", cfg.log.level.as_str());
-    json_env_logger2::init();
-    json_env_logger2::panic_hook();
+    std::env::set_var("LOG_LEVEL", cfg.log.level.as_str());
+    std_logger::Config::gcloud().init();
     log::debug!("{:?}", cfg);
 
     let pool = web::Data::new(

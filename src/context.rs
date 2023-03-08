@@ -97,46 +97,33 @@ where
     forward_ready!(service);
 
     fn call(&self, req: ServiceRequest) -> Self::Future {
-        let mut ctx = Context::new();
-        ctx.log
-            .insert("timestamp".to_string(), Value::from(ctx.unix_ms));
-        ctx.log
-            .insert("method".to_string(), Value::from(req.method().as_str()));
-        ctx.log.insert("path".to_string(), Value::from(req.path()));
-        ctx.log.insert(
-            "version".to_string(),
-            Value::from(format!("{:?}", req.version())),
-        );
+        let log_method = req.method().to_string();
+        let log_path = req.path().to_string();
+        let log_uri = req.uri().to_string();
+        let log_xid = req
+            .headers()
+            .get("x-request-id")
+            .map_or("", |h| h.to_str().unwrap())
+            .to_string();
 
-        let headers = req.headers();
-        if let Some(header) = headers.get("x-request-id") {
-            ctx.log.insert(
-                "x-request-id".to_string(),
-                Value::from(header.to_str().unwrap()),
-            );
-        }
-
+        let ctx = Context::new();
         req.request().extensions_mut().insert(ctx);
-
         let fut = self.service.call(req);
         Box::pin(async move {
             let res = fut.await?;
             {
-                let status = res.response().status();
-                let mut ctx = res.request().context_mut().unwrap();
-                let elapsed = ctx.start.elapsed().as_millis() as u64;
-
-                ctx.log.insert("duration".to_string(), Value::from(elapsed));
-                ctx.log
-                    .insert("status".to_string(), Value::from(status.as_u16()));
-                match serde_json::to_string(&ctx.log) {
-                    Ok(body) => {
-                        log::info!("{}", body);
-                    }
-                    Err(err) => {
-                        log::error!("{}", err.to_string());
-                    }
-                }
+                let ctx = res.request().context_mut().unwrap();
+                let kv = serde_json::to_string(&ctx.log).unwrap_or("{}".to_string());
+                std_logger::request!(
+                    method = log_method,
+                    path = log_path,
+                    url = log_uri,
+                    xid = log_xid,
+                    status = res.response().status().as_u16(),
+                    elapsed = ctx.start.elapsed().as_millis() as u64,
+                    kv = kv;
+                    "ok",
+                );
             }
             Ok(res)
         })
