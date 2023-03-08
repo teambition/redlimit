@@ -80,6 +80,8 @@ pub async fn post_limiting(
     ctx.log.insert("path".to_string(), Value::from(input.path));
     ctx.log.insert("id".to_string(), Value::from(input.id));
     ctx.log.insert("count".to_string(), Value::from(rt.0));
+    ctx.log
+        .insert("bursted".to_string(), Value::from(rt.0 < limit && rt.1 > 0));
     ctx.log.insert("limited".to_string(), Value::from(rt.1 > 0));
 
     respond_result(LimitResponse {

@@ -99,7 +99,6 @@ where
     fn call(&self, req: ServiceRequest) -> Self::Future {
         let log_method = req.method().to_string();
         let log_path = req.path().to_string();
-        let log_uri = req.uri().to_string();
         let log_xid = req
             .headers()
             .get("x-request-id")
@@ -117,9 +116,9 @@ where
                 std_logger::request!(
                     method = log_method,
                     path = log_path,
-                    url = log_uri,
                     xid = log_xid,
                     status = res.response().status().as_u16(),
+                    start = ctx.unix_ms,
                     elapsed = ctx.start.elapsed().as_millis() as u64,
                     kv = kv;
                     "ok",
