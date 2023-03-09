@@ -102,7 +102,7 @@ fn load_rustls_config(cfg: conf::Server) -> rustls::ServerConfig {
         Some(Item::RSAKey(key)) => PrivateKey(key),
         Some(Item::PKCS8Key(key)) => PrivateKey(key),
         Some(Item::ECKey(key)) => PrivateKey(key),
-        _ => panic!("cannot locate PKCS 8 private keys."),
+        _ => panic!("cannot locate private key"),
     };
 
     config

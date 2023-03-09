@@ -68,7 +68,7 @@ mod tests {
     async fn config_works() -> anyhow::Result<()> {
         let cfg = Conf::new()?;
         assert_eq!("development", cfg.env);
-        assert_eq!("debug", cfg.log.level);
+        assert_eq!("info", cfg.log.level);
         assert_eq!(8080, cfg.server.port);
         assert_eq!("127.0.0.1", cfg.redis.host);
         assert_eq!(6379, cfg.redis.port);

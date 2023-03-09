@@ -2,7 +2,7 @@ env = "development"
 namespace = "RL"
 
 [log]
-level = "debug" # debug, info, warn, error
+level = "info" # debug, info, warn, error
 
 [server]
 port = "8080"

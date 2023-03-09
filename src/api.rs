@@ -56,14 +56,18 @@ pub async fn post_limiting(
         .await;
     let limit = args.1;
 
-    let rt = match timeout(
-        Duration::from_millis(100),
-        redlimit::limiting(pool, &rules.ns.limiting_key(&input.scope, &input.id), args),
-    )
-    .await
-    {
-        Ok(rt) => rt,
-        Err(_) => Err(anyhow::Error::msg("limiting timeout".to_string())),
+    let rt = if pool.state().connections > 0 {
+        match timeout(
+            Duration::from_millis(100),
+            redlimit::limiting(pool, &rules.ns.limiting_key(&input.scope, &input.id), args),
+        )
+        .await
+        {
+            Ok(rt) => rt,
+            Err(_) => Err(anyhow::Error::msg("limiting timeout".to_string())),
+        }
+    } else {
+        Err(anyhow::Error::msg("no redis connection".to_string()))
     };
 
     let rt = match rt {

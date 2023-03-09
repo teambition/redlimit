@@ -1,11 +1,11 @@
 use std::{
     collections::HashMap,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use actix_web::web;
 use anyhow::{Error, Result};
-use rustis::resp;
+use rustis::{client::Client, resp};
 use serde::{Deserialize, Serialize};
 use tokio::{sync::RwLock, task::JoinHandle, time::sleep};
 use tokio_util::sync::CancellationToken;
@@ -234,7 +234,7 @@ pub async fn redrules_add(
     rules: &HashMap<String, (u64, u64)>,
 ) -> Result<()> {
     if !rules.is_empty() {
-        let mut cli = pool.get().await?;
+        let cli = pool.get().await?;
         for (k, v) in rules {
             let cmd = resp::cmd("FCALL")
                 .arg("redrules_add")
@@ -256,7 +256,7 @@ pub async fn redlist_add(
     list: &HashMap<String, u64>,
 ) -> Result<()> {
     if !list.is_empty() {
-        let mut cli = pool.get().await?;
+        let cli = pool.get().await?;
         let mut cmd = resp::cmd("FCALL")
             .arg("redlist_add")
             .arg(1)
@@ -310,40 +310,55 @@ async fn spawn_redlimit_sync(
     interval_secs: u64,
 ) {
     loop {
-        log::info!("starting redlimit sync job");
-
-        let cursor = redrules.dyn_rules.read().await.redlist_cursor;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time before Unix epoch")
-            .as_millis() as u64;
-
-        let dyn_rules = redrules_load(pool.clone(), redrules.ns.as_str(), now)
-            .await
-            .map_err(|e| log::error!("redrules_load error: {}", e))
-            .unwrap_or(HashMap::new());
-
-        let dyn_list = redlist_load(pool.clone(), redrules.ns.as_str(), now, cursor)
-            .await
-            .map_err(|e| log::error!("redlist_load error: {}", e))
-            .unwrap_or((cursor, HashMap::new()));
-
-        if !dyn_rules.is_empty() || !dyn_list.1.is_empty() {
-            redrules
-                .dyn_update(now, dyn_list.0, dyn_list.1, dyn_rules)
-                .await;
-        }
-
         tokio::select! {
-            _ = sleep(Duration::from_secs(interval_secs)) => {
-                continue;
-            }
-
             _ = stop_signal.cancelled() => {
                 log::info!("gracefully shutting down redlimit sync job");
                 break;
             }
+            _ = sleep(Duration::from_secs(interval_secs)) => {}
         };
+
+        match pool.get().await {
+            Ok(redis) => {
+                let cursor = redrules.dyn_rules.read().await.redlist_cursor;
+                let inow = Instant::now();
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("system time before Unix epoch")
+                    .as_millis() as u64;
+
+                let dyn_rules = redrules_load(redis.clone(), redrules.ns.as_str(), now)
+                    .await
+                    .map_err(|e| log::error!("redrules_load error: {}", e))
+                    .unwrap_or(HashMap::new());
+
+                let dyn_list = redlist_load(redis.clone(), redrules.ns.as_str(), now, cursor)
+                    .await
+                    .map_err(|e| log::error!("redlist_load error: {}", e))
+                    .unwrap_or((cursor, HashMap::new()));
+
+                let cursor = dyn_list.0;
+                let rules_len = dyn_rules.len();
+                let list_len = dyn_list.1.len();
+                if !dyn_rules.is_empty() || !dyn_list.1.is_empty() {
+                    redrules
+                        .dyn_update(now, cursor, dyn_list.1, dyn_rules)
+                        .await;
+                }
+
+                log::info!(target: "sync",
+                    cursor = cursor,
+                    redrules = rules_len,
+                    redlist = list_len,
+                    elapsed = inow.elapsed().as_millis() as u64;
+                    "ok",
+                );
+            }
+
+            Err(e) => {
+                log::error!("spawn_redlimit_sync loop error: {}", e);
+            }
+        }
     }
 }
 
@@ -351,17 +366,16 @@ async fn spawn_redlimit_sync(
 struct RedRuleEntry(String, String, u64, u64);
 
 async fn redrules_load(
-    pool: web::Data<RedisPool>,
+    redis: Client,
     ns: &str,
     now: u64,
 ) -> anyhow::Result<HashMap<String, (u64, u64)>> {
-    let mut cli = pool.get().await?;
     let redrules_cmd = resp::cmd("FCALL")
         .arg("redrules_all")
         .arg(1)
         .arg(ns.to_string());
 
-    let data = cli.send(redrules_cmd, None).await?.to::<Vec<String>>()?;
+    let data = redis.send(redrules_cmd, None).await?.to::<Vec<String>>()?;
     let mut rt: HashMap<String, (u64, u64)> = HashMap::new();
     let mut has_stale = false;
     for s in data {
@@ -379,7 +393,7 @@ async fn redrules_load(
             .arg("redrules_add")
             .arg(1)
             .arg(ns.to_string());
-        cli.send(sweep_cmd, None).await?;
+        redis.send(sweep_cmd, None).await?;
     }
 
     Ok(rt)
@@ -387,12 +401,11 @@ async fn redrules_load(
 
 const REDLIST_SCAN_COUNT: usize = 10000;
 async fn redlist_load(
-    pool: web::Data<RedisPool>,
+    redis: Client,
     ns: &str,
     now: u64,
     cursor: u64,
 ) -> anyhow::Result<(u64, HashMap<String, u64>)> {
-    let mut cli = pool.get().await?;
     let mut cursor = cursor;
     let mut has_stale = false;
     let mut rt: HashMap<String, u64> = HashMap::new();
@@ -404,7 +417,7 @@ async fn redlist_load(
             .arg(ns.to_string())
             .arg(cursor);
 
-        let data = cli.send(blacklist_cmd, None).await?.to::<Vec<String>>()?;
+        let data = redis.send(blacklist_cmd, None).await?.to::<Vec<String>>()?;
         let has_next = data.len() >= REDLIST_SCAN_COUNT;
 
         let mut iter = data.into_iter();
@@ -452,7 +465,7 @@ async fn redlist_load(
             .arg("redlist_add")
             .arg(1)
             .arg(ns.to_string());
-        cli.send(sweep_cmd, None).await?;
+        redis.send(sweep_cmd, None).await?;
     }
 
     Ok((cursor, rt))
@@ -779,21 +792,23 @@ mod tests {
             .expect("system time before Unix epoch")
             .as_millis() as u64;
 
-        let dyn_redrules = redrules_load(pool.clone(), ns, ts).await?;
+        let cli = pool.get().await?;
+
+        let dyn_redrules = redrules_load(cli.clone(), ns, ts).await?;
         assert!(dyn_redrules.is_empty());
 
         let mut rules = HashMap::new();
         redrules_add(pool.clone(), ns, "core", &rules).await?;
-        let dyn_redrules = redrules_load(pool.clone(), ns, ts).await?;
+        let dyn_redrules = redrules_load(cli.clone(), ns, ts).await?;
         assert!(dyn_redrules.is_empty());
 
         rules.insert("path1".to_owned(), (2, 100));
         redrules_add(pool.clone(), ns, "core", &rules).await?;
-        let dyn_redrules = redrules_load(pool.clone(), ns, ts).await?;
+        let dyn_redrules = redrules_load(cli.clone(), ns, ts).await?;
         assert_eq!(1, dyn_redrules.len());
 
         redrules_add(pool.clone(), ns, "core2", &rules).await?;
-        let dyn_redrules = redrules_load(pool.clone(), ns, ts).await?;
+        let dyn_redrules = redrules_load(cli.clone(), ns, ts).await?;
         assert_eq!(2, dyn_redrules.len());
 
         let rt = dyn_redrules
@@ -810,16 +825,16 @@ mod tests {
         assert_eq!(2, rt.0);
         assert!(rt.1 > ts);
 
-        let dyn_redrules = redrules_load(pool.clone(), ns, ts + 210).await?;
+        let dyn_redrules = redrules_load(cli.clone(), ns, ts + 210).await?;
         assert_eq!(0, dyn_redrules.len());
 
-        let dyn_redrules = redrules_load(pool.clone(), ns, ts).await?;
+        let dyn_redrules = redrules_load(cli.clone(), ns, ts).await?;
         assert_eq!(2, dyn_redrules.len());
 
         sleep(Duration::from_millis(210)).await;
-        let dyn_redrules = redrules_load(pool.clone(), ns, ts + 210).await?;
+        let dyn_redrules = redrules_load(cli.clone(), ns, ts + 210).await?;
         assert_eq!(0, dyn_redrules.len(), "will sweep stale rules");
-        let dyn_redrules = redrules_load(pool.clone(), ns, ts).await?;
+        let dyn_redrules = redrules_load(cli.clone(), ns, ts).await?;
         assert_eq!(0, dyn_redrules.len(), "should sweeped stale rules");
 
         Ok(())
@@ -834,23 +849,24 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time before Unix epoch")
             .as_millis() as u64;
+        let cli = pool.get().await?;
 
-        let dyn_redlist = redlist_load(pool.clone(), ns, ts, 0).await?;
+        let dyn_redlist = redlist_load(cli.clone(), ns, ts, 0).await?;
         assert!(dyn_redlist.1.is_empty());
 
         let mut rules: HashMap<String, u64> = HashMap::new();
         redlist_add(pool.clone(), ns, &rules).await?;
-        let dyn_redlist = redlist_load(pool.clone(), ns, ts, 0).await?;
+        let dyn_redlist = redlist_load(cli.clone(), ns, ts, 0).await?;
         assert!(dyn_redlist.1.is_empty());
 
         rules.insert("user1".to_owned(), 100);
         redlist_add(pool.clone(), ns, &rules).await?;
-        let dyn_redlist = redlist_load(pool.clone(), ns, ts, 0).await?;
+        let dyn_redlist = redlist_load(cli.clone(), ns, ts, 0).await?;
         assert!(dyn_redlist.0 > ts - 1000);
         assert_eq!(1, dyn_redlist.1.len());
 
         redlist_add(pool.clone(), ns, &rules).await?;
-        let dyn_redlist = redlist_load(pool.clone(), ns, ts, dyn_redlist.0).await?;
+        let dyn_redlist = redlist_load(cli.clone(), ns, ts, dyn_redlist.0).await?;
         assert!(dyn_redlist.0 > ts);
         assert_eq!(1, dyn_redlist.1.len());
 
@@ -861,15 +877,15 @@ mod tests {
             .to_owned();
         assert!(rt > ts);
 
-        let dyn_redlist = redlist_load(pool.clone(), ns, ts + 210, 0).await?;
+        let dyn_redlist = redlist_load(cli.clone(), ns, ts + 210, 0).await?;
         assert_eq!(0, dyn_redlist.1.len());
-        let dyn_redlist = redlist_load(pool.clone(), ns, ts, 0).await?;
+        let dyn_redlist = redlist_load(cli.clone(), ns, ts, 0).await?;
         assert_eq!(1, dyn_redlist.1.len());
 
         sleep(Duration::from_millis(210)).await;
-        let dyn_redlist = redlist_load(pool.clone(), ns, ts + 210, 0).await?;
+        let dyn_redlist = redlist_load(cli.clone(), ns, ts + 210, 0).await?;
         assert_eq!(0, dyn_redlist.1.len(), "will sweep stale rules");
-        let dyn_redlist = redlist_load(pool.clone(), ns, ts, 0).await?;
+        let dyn_redlist = redlist_load(cli.clone(), ns, ts, 0).await?;
         assert_eq!(0, dyn_redlist.1.len(), "should sweeped stale rules");
 
         Ok(())

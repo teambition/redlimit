@@ -113,7 +113,7 @@ where
             {
                 let ctx = res.request().context_mut().unwrap();
                 let kv = serde_json::to_string(&ctx.log).unwrap_or("{}".to_string());
-                std_logger::request!(
+                log::info!(target: "api",
                     method = log_method,
                     path = log_path,
                     xid = log_xid,
