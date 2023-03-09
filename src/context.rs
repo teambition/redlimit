@@ -15,6 +15,13 @@ use serde_json::Value;
 
 pub struct ContextTransform;
 
+pub fn unix_ms() -> u64 {
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time before Unix epoch");
+    ts.as_millis() as u64
+}
+
 pub struct Context {
     pub unix_ms: u64,
     pub start: Instant,
@@ -23,11 +30,8 @@ pub struct Context {
 
 impl Context {
     pub fn new() -> Self {
-        let ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time before Unix epoch");
         Context {
-            unix_ms: ts.as_millis() as u64,
+            unix_ms: unix_ms(),
             start: Instant::now(),
             log: HashMap::new(),
         }

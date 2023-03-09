@@ -1,6 +1,6 @@
 [package]
 name = "redlimit"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "A redis-based distributed rate limit HTTP service."
 publish = false

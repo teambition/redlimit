@@ -1,6 +1,6 @@
 #!lua name=redlimit
 
-local function now_ms()
+local function unix_ms()
   local now = redis.call('TIME')
   return tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)
 end
@@ -32,7 +32,7 @@ local function limiting(keys, args)
     result[1] = tonumber(limit[1]) + quantity
 
     if max_burst > 0 then
-      local ts = now_ms()
+      local ts = unix_ms()
       burst = tonumber(limit[2]) + quantity
       burst_at = tonumber(limit[3])
       if burst_at + burst_period <= ts  then
@@ -62,7 +62,7 @@ local function limiting(keys, args)
   else
     if max_burst > 0 then
       burst = quantity
-      burst_at = now_ms()
+      burst_at = unix_ms()
     end
 
     redis.call('HSET', keys[1], 'c', quantity, 'b', burst, 't', burst_at)
@@ -78,7 +78,7 @@ end
 local function redlist_add(keys, args)
   local cursor_key = keys[1] .. ':LC'
   local ttl_key = keys[1] .. ':LT'
-  local ts = now_ms()
+  local ts = unix_ms()
   local members = redis.call('ZRANGE', ttl_key, '-inf', '(' .. ts, 'BYSCORE')
   if #members > 0 then
     redis.call('ZREM', ttl_key, unpack(members))
@@ -129,7 +129,7 @@ end
 local function redrules_add(keys, args)
   local ttl_key = keys[1] .. ':RT'
   local data_key = keys[1] .. ':RD'
-  local ts = now_ms()
+  local ts = unix_ms()
   local members = redis.call('ZRANGE', ttl_key, '-inf', '(' .. ts, 'BYSCORE')
   if #members > 0 then
     redis.call('HDEL', data_key, unpack(members))
@@ -140,7 +140,7 @@ local function redrules_add(keys, args)
     return 0
   end
 
-  local id = args[1] .. args[2]
+  local id = args[1] .. ':' .. args[2]
   local quantity = tonumber(args[3]) or 1
   local ttl = ts + (tonumber(args[4]) or 1000)
   redis.call('ZADD', ttl_key, ttl, id)

@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use actix_web::web;
@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use tokio::{sync::RwLock, task::JoinHandle, time::sleep};
 use tokio_util::sync::CancellationToken;
 
-use super::{conf::Rule, redis::RedisPool, redlimit_lua};
+use super::{conf::Rule, context::unix_ms, redis::RedisPool, redlimit_lua};
 
 pub struct RedRules {
     pub ns: NS,
@@ -271,7 +271,7 @@ pub async fn redlist_add(
     Ok(())
 }
 
-pub async fn init_redlimit_fn(pool: web::Data<RedisPool>) -> Result<()> {
+pub async fn init_redlimit_fn(pool: web::Data<RedisPool>) -> anyhow::Result<()> {
     let cmd = resp::cmd("FUNCTION")
         .arg("LOAD")
         .arg(redlimit_lua::REDLIMIT);
@@ -280,7 +280,7 @@ pub async fn init_redlimit_fn(pool: web::Data<RedisPool>) -> Result<()> {
     if data.is_error() {
         let err = data.to_string();
         if !err.contains("already exists") {
-            return Err(Error::msg(data));
+            return Err(Error::msg(err));
         }
     }
     Ok(())
@@ -318,48 +318,56 @@ async fn spawn_redlimit_sync(
             _ = sleep(Duration::from_secs(interval_secs)) => {}
         };
 
-        match pool.get().await {
-            Ok(redis) => {
-                let cursor = redrules.dyn_rules.read().await.redlist_cursor;
-                let inow = Instant::now();
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .expect("system time before Unix epoch")
-                    .as_millis() as u64;
+        let rt = redlimit_sync_job(pool.clone(), redrules.clone()).await;
+        if rt.is_err() {
+            log::error!("redlimit_sync_job error: {:?}", rt);
 
-                let dyn_rules = redrules_load(redis.clone(), redrules.ns.as_str(), now)
-                    .await
-                    .map_err(|e| log::error!("redrules_load error: {}", e))
-                    .unwrap_or(HashMap::new());
-
-                let dyn_list = redlist_load(redis.clone(), redrules.ns.as_str(), now, cursor)
-                    .await
-                    .map_err(|e| log::error!("redlist_load error: {}", e))
-                    .unwrap_or((cursor, HashMap::new()));
-
-                let cursor = dyn_list.0;
-                let rules_len = dyn_rules.len();
-                let list_len = dyn_list.1.len();
-                if !dyn_rules.is_empty() || !dyn_list.1.is_empty() {
-                    redrules
-                        .dyn_update(now, cursor, dyn_list.1, dyn_rules)
-                        .await;
+            // auto load function
+            if rt.unwrap_err().to_string().contains("Function not found") {
+                match init_redlimit_fn(pool.clone()).await {
+                    Ok(_) => {
+                        log::warn!("init_redlimit_fn success");
+                    }
+                    Err(e) => {
+                        log::error!("init_redlimit_fn error: {:?}", e);
+                    }
                 }
-
-                log::info!(target: "sync",
-                    cursor = cursor,
-                    redrules = rules_len,
-                    redlist = list_len,
-                    elapsed = inow.elapsed().as_millis() as u64;
-                    "ok",
-                );
-            }
-
-            Err(e) => {
-                log::error!("spawn_redlimit_sync loop error: {}", e);
             }
         }
     }
+}
+
+async fn redlimit_sync_job(
+    pool: web::Data<RedisPool>,
+    redrules: web::Data<RedRules>,
+) -> anyhow::Result<()> {
+    let redis = pool.get().await?;
+    let cursor = redrules.dyn_rules.read().await.redlist_cursor;
+    let inow = Instant::now();
+    let now = unix_ms();
+
+    let dyn_rules = redrules_load(redis.clone(), redrules.ns.as_str(), now).await?;
+
+    let dyn_list = redlist_load(redis.clone(), redrules.ns.as_str(), now, cursor).await?;
+
+    let cursor = dyn_list.0;
+    let rules_len = dyn_rules.len();
+    let list_len = dyn_list.1.len();
+    if !dyn_rules.is_empty() || !dyn_list.1.is_empty() {
+        redrules
+            .dyn_update(now, cursor, dyn_list.1, dyn_rules)
+            .await;
+    }
+
+    log::info!(target: "sync",
+        cursor = cursor,
+        redrules = rules_len,
+        redlist = list_len,
+        elapsed = inow.elapsed().as_millis() as u64;
+        "ok",
+    );
+
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -575,10 +583,7 @@ mod tests {
             );
         }
 
-        let ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time before Unix epoch")
-            .as_millis() as u64;
+        let ts = unix_ms();
         {
             let mut dyn_blacklist = HashMap::new();
             dyn_blacklist.insert("user1".to_owned(), ts + 1000);
@@ -787,10 +792,7 @@ mod tests {
         let ns = "redrules_add_load_works";
         let cfg = conf::Conf::new()?;
         let pool = web::Data::new(redis::new(cfg.redis.clone()).await?);
-        let ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time before Unix epoch")
-            .as_millis() as u64;
+        let ts = unix_ms();
 
         let cli = pool.get().await?;
 
@@ -845,10 +847,7 @@ mod tests {
         let ns = "redlist_add_load_works";
         let cfg = conf::Conf::new()?;
         let pool = web::Data::new(redis::new(cfg.redis.clone()).await?);
-        let ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time before Unix epoch")
-            .as_millis() as u64;
+        let ts = unix_ms();
         let cli = pool.get().await?;
 
         let dyn_redlist = redlist_load(cli.clone(), ns, ts, 0).await?;
