@@ -2,7 +2,7 @@ use std::{fs::File, io::BufReader};
 
 use actix_web::{web, App, HttpServer};
 use rustls::{Certificate, PrivateKey, ServerConfig};
-use rustls_pemfile::{certs, pkcs8_private_keys};
+use rustls_pemfile::{certs, read_one, Item};
 use tokio::time::Duration;
 
 mod api;
@@ -17,7 +17,7 @@ async fn main() -> anyhow::Result<()> {
     let cfg = conf::Conf::new().unwrap_or_else(|err| panic!("config error: {}", err));
 
     std::env::set_var("LOG_LEVEL", cfg.log.level.as_str());
-    std_logger::Config::gcloud().init();
+    std_logger::Config::json().init();
     log::debug!("{:?}", cfg);
 
     let pool = web::Data::new(
@@ -84,8 +84,12 @@ fn load_rustls_config(cfg: conf::Server) -> rustls::ServerConfig {
         .with_no_client_auth();
 
     // load TLS key/cert files
-    let cert_file = &mut BufReader::new(File::open(cfg.cert_file.as_str()).unwrap());
-    let key_file = &mut BufReader::new(File::open(cfg.key_file.as_str()).unwrap());
+    let cert_file = &mut BufReader::new(
+        File::open(cfg.cert_file.as_str()).expect("cannot open certificate file"),
+    );
+    let key_file = &mut BufReader::new(
+        File::open(cfg.key_file.as_str()).expect("cannot open private key file"),
+    );
 
     // convert files to key/cert objects
     let cert_chain = certs(cert_file)
@@ -93,17 +97,15 @@ fn load_rustls_config(cfg: conf::Server) -> rustls::ServerConfig {
         .into_iter()
         .map(Certificate)
         .collect();
-    let mut keys: Vec<PrivateKey> = pkcs8_private_keys(key_file)
-        .unwrap()
-        .into_iter()
-        .map(PrivateKey)
-        .collect();
 
-    // exit if no keys could be parsed
-    if keys.is_empty() {
-        eprintln!("Could not locate PKCS 8 private keys.");
-        std::process::exit(1);
-    }
+    let key = match read_one(key_file).unwrap() {
+        Some(Item::RSAKey(key)) => PrivateKey(key),
+        Some(Item::PKCS8Key(key)) => PrivateKey(key),
+        Some(Item::ECKey(key)) => PrivateKey(key),
+        _ => panic!("cannot locate PKCS 8 private keys."),
+    };
 
-    config.with_single_cert(cert_chain, keys.remove(0)).unwrap()
+    config
+        .with_single_cert(cert_chain, key)
+        .expect("cannot build rustls::ServerConfig")
 }
