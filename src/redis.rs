@@ -19,7 +19,7 @@ pub async fn new(cfg: super::conf::Redis) -> Result<RedisPool, rustis::Error> {
 
     let manager = PooledClientManager::new(config).unwrap();
     RedisPool::builder()
-        .max_size(1000)
+        .max_size(cfg.max_connections as u32)
         .min_idle(Some(5))
         .max_lifetime(None)
         .idle_timeout(Some(Duration::from_secs(120)))
@@ -41,6 +41,7 @@ mod tests {
             port: 6379,
             username: String::new(),
             password: String::new(),
+            max_connections: 10,
         })
         .await?;
 

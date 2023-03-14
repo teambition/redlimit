@@ -208,7 +208,7 @@ pub async fn limiting(
     let mut cmd = resp::cmd("FCALL")
         .arg("limiting")
         .arg(1)
-        .arg(limiting_key.to_string())
+        .arg(limiting_key)
         .arg(args.0)
         .arg(args.1)
         .arg(args.2);
@@ -239,9 +239,9 @@ pub async fn redrules_add(
             let cmd = resp::cmd("FCALL")
                 .arg("redrules_add")
                 .arg(1)
-                .arg(ns.to_string())
-                .arg(scope.to_string())
-                .arg(k.clone())
+                .arg(ns)
+                .arg(scope)
+                .arg(k)
                 .arg(v.0)
                 .arg(v.1);
             cli.send(cmd, None).await?;
@@ -257,13 +257,10 @@ pub async fn redlist_add(
 ) -> Result<()> {
     if !list.is_empty() {
         let cli = pool.get().await?;
-        let mut cmd = resp::cmd("FCALL")
-            .arg("redlist_add")
-            .arg(1)
-            .arg(ns.to_string());
+        let mut cmd = resp::cmd("FCALL").arg("redlist_add").arg(1).arg(ns);
 
         for (k, v) in list {
-            cmd = cmd.arg(k.clone()).arg(*v);
+            cmd = cmd.arg(k).arg(*v);
         }
 
         cli.send(cmd, None).await?;
@@ -378,10 +375,7 @@ async fn redrules_load(
     ns: &str,
     now: u64,
 ) -> anyhow::Result<HashMap<String, (u64, u64)>> {
-    let redrules_cmd = resp::cmd("FCALL")
-        .arg("redrules_all")
-        .arg(1)
-        .arg(ns.to_string());
+    let redrules_cmd = resp::cmd("FCALL").arg("redrules_all").arg(1).arg(ns);
 
     let data = redis.send(redrules_cmd, None).await?.to::<Vec<String>>()?;
     let mut rt: HashMap<String, (u64, u64)> = HashMap::new();
@@ -397,10 +391,7 @@ async fn redrules_load(
     }
 
     if has_stale {
-        let sweep_cmd = resp::cmd("FCALL")
-            .arg("redrules_add")
-            .arg(1)
-            .arg(ns.to_string());
+        let sweep_cmd = resp::cmd("FCALL").arg("redrules_add").arg(1).arg(ns);
         redis.send(sweep_cmd, None).await?;
     }
 
@@ -422,7 +413,7 @@ async fn redlist_load(
         let blacklist_cmd = resp::cmd("FCALL")
             .arg("redlist_scan")
             .arg(1)
-            .arg(ns.to_string())
+            .arg(ns)
             .arg(cursor);
 
         let data = redis.send(blacklist_cmd, None).await?.to::<Vec<String>>()?;
@@ -469,10 +460,7 @@ async fn redlist_load(
     }
 
     if has_stale {
-        let sweep_cmd = resp::cmd("FCALL")
-            .arg("redlist_add")
-            .arg(1)
-            .arg(ns.to_string());
+        let sweep_cmd = resp::cmd("FCALL").arg("redlist_add").arg(1).arg(ns);
         redis.send(sweep_cmd, None).await?;
     }
 

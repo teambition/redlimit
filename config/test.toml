@@ -8,12 +8,14 @@ level = "info" # debug, info, warn, error
 port = "8080"
 cert_file = ""
 key_file = ""
+workers = "2"
 
 [redis]
 host = "127.0.0.1"
 port = "6379"
 username = ""
 password = ""
+max_connections = "10"
 
 [job]
 interval = 1 # seconds

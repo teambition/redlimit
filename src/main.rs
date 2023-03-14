@@ -12,6 +12,9 @@ mod redis;
 mod redlimit;
 mod redlimit_lua;
 
+const APP_NAME: &str = env!("CARGO_PKG_NAME");
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cfg = conf::Conf::new().unwrap_or_else(|err| panic!("config error: {}", err));
@@ -39,7 +42,8 @@ async fn main() -> anyhow::Result<()> {
     let server = HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(api::AppInfo {
-                version: String::from("v0.1.0"),
+                name: APP_NAME.to_string(),
+                version: APP_VERSION.to_string(),
             }))
             .app_data(pool.clone())
             .app_data(redrules.clone())
@@ -57,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
             )
             .route("/version", web::get().to(api::version))
     })
-    .workers(2)
+    .workers(cfg.server.workers as usize)
     .keep_alive(Duration::from_secs(25))
     .shutdown_timeout(10);
 

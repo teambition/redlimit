@@ -13,6 +13,8 @@ pub struct Server {
     pub port: u16,
     pub cert_file: String,
     pub key_file: String,
+    #[serde(default)]
+    pub workers: u16,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -21,6 +23,8 @@ pub struct Redis {
     pub port: u16,
     pub username: String,
     pub password: String,
+    #[serde(default)]
+    pub max_connections: u16,
 }
 
 #[derive(Debug, Deserialize, Clone)]

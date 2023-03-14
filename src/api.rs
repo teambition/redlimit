@@ -9,6 +9,7 @@ use crate::{context::ContextExt, redis::RedisPool, redlimit, redlimit::RedRules}
 
 #[derive(Serialize, Deserialize)]
 pub struct AppInfo {
+    pub name: String,
     pub version: String,
 }
 
@@ -170,12 +171,16 @@ mod tests {
     use super::*;
     use actix_web::{http::header::ContentType, test, App};
 
+    const APP_NAME: &str = env!("CARGO_PKG_NAME");
+    const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
     #[actix_web::test]
     async fn get_version_works() -> anyhow::Result<()> {
         let cfg = super::super::conf::Conf::new()?;
         let pool = web::Data::new(super::super::redis::new(cfg.redis.clone()).await?);
         let info = web::Data::new(AppInfo {
-            version: String::from("v0.1.0"),
+            name: APP_NAME.to_string(),
+            version: APP_VERSION.to_string(),
         });
 
         let app = test::init_service(
