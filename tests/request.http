@@ -13,8 +13,9 @@ POST http://127.0.0.1:8080/redlist
 Content-Type: application/json
 
 {
-  "user1": 5000,
-  "user2": 120000
+  "user1": 50000,
+  "user2": 120000,
+  "ip3": 120000
 }
 
 ###
@@ -28,8 +29,8 @@ Content-Type: application/json
 {
   "scope": "core",
   "rules": {
-    "POST /v1/file/list": [10, 10000],
-    "POST /v2/file/list": [8, 20000]
+    "GET /v1/file/list": [10, 10000],
+    "GET /v2/file/list": [8, 20000]
   }
 }
 

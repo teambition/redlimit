@@ -1,34 +1,53 @@
 env = "development"
+# The prefix of redis key
 namespace = "RL"
 
 [log]
-level = "info" # debug, info, warn, error
+# Log level: "trace", "debug", "info", "warn", "error"
+level = "info"
 
 [server]
-port = "8080"
+# The address to bind to.
+port = 8080
+# cert file path to enable https, example: "/etc/https/mydomain.crt"
 cert_file = ""
+# key file path to enable https, example: "/etc/https/mydomain.key"
 key_file = ""
-workers = "2"
+# The number of workers to start (per bind address).
+# By default, the number of available physical CPUs is used as the worker count.
+workers = 2
 
 [redis]
+# Redis server address
 host = "127.0.0.1"
-port = "6379"
+# Redis server port
+port = 6379
+# Redis server username
 username = ""
+# Redis server password
 password = ""
-max_connections = "100"
+# The maximum number of connections managed by the pool, should > 0.
+max_connections = 100
 
 [job]
+# The interval to sync redlimit dynamic rules from redis.
 interval = 3 # seconds
 
-[rules."*"] # default rule
-# <max count per period> <period with millisecond> <max burst> <burst period with millisecond>
+# The default rule that will be used if no matched limiting "scope" found.
+[rules."*"]
+# <max count per period>, <period with millisecond>, <max burst>, <burst period with millisecond>
 limit = [10, 10000, 3, 1000]
 
-[rules."-"] # floor rule
+# The floor rule that will be used if limiting "id" exists in redlist.
+[rules."-"]
 limit = [3, 10000, 1, 1000]
 
+# A rule for scope named "core". You can add more rules for other scopes.
 [rules.core]
-limit = [200, 10000, 10, 2000]
+limit = [100, 10000, 50, 2000]
 
+# A list of "path" in scope "core".
 [rules.core.path]
-"POST /v1/file/list" = 2 # quantity, default to 1 if no matched
+# A path named "GET /v1/file/list" in scope "core", it's quantity is 5, default to 1 if no "path" matched.
+# You can add more <path = quantity> for scope "core".
+"GET /v1/file/list" = 5

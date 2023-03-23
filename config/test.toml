@@ -5,17 +5,17 @@ namespace = "TEST"
 level = "info" # debug, info, warn, error
 
 [server]
-port = "8080"
+port = 8080
 cert_file = ""
 key_file = ""
-workers = "2"
+workers = 1
 
 [redis]
 host = "127.0.0.1"
-port = "6379"
+port = 6379
 username = ""
 password = ""
-max_connections = "10"
+max_connections = 10
 
 [job]
 interval = 1 # seconds
@@ -28,7 +28,7 @@ limit = [10, 10000, 3, 1000]
 limit = [3, 10000, 1, 1000]
 
 [rules.core]
-limit = [200, 10000, 10, 2000]
+limit = [100, 10000, 20, 1000]
 
 [rules.core.path]
-"POST /v1/file/list" = 2 # quantity, default to 1 if no matched
+"GET /v1/file/list" = 2 # quantity, default to 1 if no matched

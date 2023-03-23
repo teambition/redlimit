@@ -494,13 +494,13 @@ mod tests {
         );
 
         assert_eq!(
-            LimitArgs(1, 200, 10000, 10, 2000),
-            LimitArgs::new(1, &vec![200, 10000, 10, 2000])
+            LimitArgs(1, 100, 10000, 50, 2000),
+            LimitArgs::new(1, &vec![100, 10000, 50, 2000])
         );
 
         assert_eq!(
             LimitArgs(1, 0, 0, 0, 0),
-            LimitArgs::new(1, &vec![200, 10000, 10, 2000, 1])
+            LimitArgs::new(1, &vec![100, 10000, 50, 2000, 1])
         );
 
         Ok(())
@@ -523,14 +523,10 @@ mod tests {
                 .rules
                 .get("core")
                 .ok_or(anyhow::Error::msg("'core' not exists"))?;
-            assert_eq!(vec![200, 10000, 10, 2000], core_rules.limit);
+            assert_eq!(vec![100, 10000, 50, 2000], core_rules.limit);
             assert_eq!(
-                2,
-                core_rules
-                    .path
-                    .get("POST /v1/file/list")
-                    .unwrap()
-                    .to_owned()
+                5,
+                core_rules.path.get("GET /v1/file/list").unwrap().to_owned()
             );
 
             assert!(redrules.rules.get("core2").is_none());
@@ -541,23 +537,23 @@ mod tests {
             assert!(redrules.redrules(0).await.is_empty());
 
             assert_eq!(
-                LimitArgs(2, 200, 10000, 10, 2000),
+                LimitArgs(5, 100, 10000, 50, 2000),
                 redrules
-                    .limit_args(0, "core", "POST /v1/file/list", "user1")
+                    .limit_args(0, "core", "GET /v1/file/list", "user1")
                     .await
             );
             assert_eq!(
-                LimitArgs(2, 200, 10000, 10, 2000),
+                LimitArgs(5, 100, 10000, 50, 2000),
                 redrules
-                    .limit_args(0, "core", "POST /v1/file/list", "user2")
+                    .limit_args(0, "core", "GET /v1/file/list", "user2")
                     .await,
                 "any user"
             );
 
             assert_eq!(
-                LimitArgs(1, 200, 10000, 10, 2000),
+                LimitArgs(1, 100, 10000, 50, 2000),
                 redrules
-                    .limit_args(0, "core", "POST /v2/file/list", "user1")
+                    .limit_args(0, "core", "GET /v2/file/list", "user1")
                     .await,
                 "path not exists"
             );
@@ -565,7 +561,7 @@ mod tests {
             assert_eq!(
                 LimitArgs(1, 10, 10000, 3, 1000),
                 redrules
-                    .limit_args(0, "core2", "POST /v1/file/list", "user1")
+                    .limit_args(0, "core2", "GET /v1/file/list", "user1")
                     .await,
                 "scope not exists"
             );
@@ -592,28 +588,28 @@ mod tests {
             assert_eq!(
                 LimitArgs(1, 3, 10000, 1, 1000),
                 redrules
-                    .limit_args(0, "core", "POST /v1/file/list", "user1")
+                    .limit_args(0, "core", "GET /v1/file/list", "user1")
                     .await,
                 "limited by dyn_blacklist"
             );
             assert_eq!(
-                LimitArgs(2, 200, 10000, 10, 2000),
+                LimitArgs(5, 100, 10000, 50, 2000),
                 redrules
-                    .limit_args(0, "core", "POST /v1/file/list", "user2")
+                    .limit_args(0, "core", "GET /v1/file/list", "user2")
                     .await,
                 "not limited by dyn_blacklist"
             );
             assert_eq!(
                 LimitArgs(1, 3, 10000, 1, 1000),
                 redrules
-                    .limit_args(ts, "core", "POST /v1/file/list", "user1")
+                    .limit_args(ts, "core", "GET /v1/file/list", "user1")
                     .await,
                 "limited by dyn_blacklist"
             );
             assert_eq!(
-                LimitArgs(2, 200, 10000, 10, 2000),
+                LimitArgs(5, 100, 10000, 50, 2000),
                 redrules
-                    .limit_args(ts + 1001, "core", "POST /v1/file/list", "user1")
+                    .limit_args(ts + 1001, "core", "GET /v1/file/list", "user1")
                     .await,
                 "not limited by dyn_blacklist after ttl"
             );
@@ -621,8 +617,8 @@ mod tests {
 
         {
             let mut dyn_rules = HashMap::new();
-            dyn_rules.insert("core:POST /v1/file/list".to_owned(), (3, ts + 1000));
-            dyn_rules.insert("core:GET /v1/file/list".to_owned(), (5, ts + 1000));
+            dyn_rules.insert("core:GET /v1/file/list".to_owned(), (3, ts + 1000));
+            dyn_rules.insert("core:GET /v2/file/list".to_owned(), (5, ts + 1000));
             redrules.dyn_update(ts, 2, HashMap::new(), dyn_rules).await;
 
             {
@@ -638,43 +634,43 @@ mod tests {
             assert_eq!(
                 LimitArgs(1, 3, 10000, 1, 1000),
                 redrules
-                    .limit_args(0, "core", "POST /v1/file/list", "user1")
+                    .limit_args(0, "core", "GET /v1/file/list", "user1")
                     .await,
                 "limited by dyn_blacklist"
             );
             assert_eq!(
-                LimitArgs(3, 200, 10000, 10, 2000),
-                redrules
-                    .limit_args(0, "core", "POST /v1/file/list", "user2")
-                    .await,
-                "limited by dyn_rules"
-            );
-            assert_eq!(
-                LimitArgs(5, 200, 10000, 10, 2000),
+                LimitArgs(3, 100, 10000, 50, 2000),
                 redrules
                     .limit_args(0, "core", "GET /v1/file/list", "user2")
                     .await,
                 "limited by dyn_rules"
             );
+            assert_eq!(
+                LimitArgs(5, 100, 10000, 50, 2000),
+                redrules
+                    .limit_args(0, "core", "GET /v2/file/list", "user2")
+                    .await,
+                "limited by dyn_rules"
+            );
 
             assert_eq!(
-                LimitArgs(2, 200, 10000, 10, 2000),
+                LimitArgs(5, 100, 10000, 50, 2000),
                 redrules
-                    .limit_args(ts + 1001, "core", "POST /v1/file/list", "user1")
+                    .limit_args(ts + 1001, "core", "GET /v1/file/list", "user1")
                     .await,
                 "not limited by dyn_blacklist after ttl"
             );
             assert_eq!(
-                LimitArgs(2, 200, 10000, 10, 2000),
-                redrules
-                    .limit_args(ts + 1001, "core", "POST /v1/file/list", "user2")
-                    .await,
-                "not limited by dyn_blacklist after ttl"
-            );
-            assert_eq!(
-                LimitArgs(1, 200, 10000, 10, 2000),
+                LimitArgs(5, 100, 10000, 50, 2000),
                 redrules
                     .limit_args(ts + 1001, "core", "GET /v1/file/list", "user2")
+                    .await,
+                "not limited by dyn_blacklist after ttl"
+            );
+            assert_eq!(
+                LimitArgs(1, 100, 10000, 50, 2000),
+                redrules
+                    .limit_args(ts + 1001, "core", "GET /v2/file/list", "user2")
                     .await,
                 "not limited by dyn_blacklist after ttl"
             );
@@ -700,7 +696,7 @@ mod tests {
             );
 
             let mut dyn_rules = HashMap::new();
-            dyn_rules.insert("core:POST /v1/file/list".to_owned(), (3, ts + 1000)); // stale rules
+            dyn_rules.insert("core:GET /v1/file/list".to_owned(), (3, ts + 1000)); // stale rules
             dyn_rules.insert("core:GET /v1/file/list".to_owned(), (5, ts + 1002));
 
             redrules

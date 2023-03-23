@@ -13,7 +13,6 @@ pub struct Server {
     pub port: u16,
     pub cert_file: String,
     pub key_file: String,
-    #[serde(default)]
     pub workers: u16,
 }
 
@@ -23,7 +22,6 @@ pub struct Redis {
     pub port: u16,
     pub username: String,
     pub password: String,
-    #[serde(default)]
     pub max_connections: u16,
 }
 
@@ -96,14 +94,10 @@ mod tests {
             .rules
             .get("core")
             .ok_or(anyhow::Error::msg("'core' not exists"))?;
-        assert_eq!(vec![200, 10000, 10, 2000], core_rules.limit);
+        assert_eq!(vec![100, 10000, 50, 2000], core_rules.limit);
         assert_eq!(
-            2,
-            core_rules
-                .path
-                .get("POST /v1/file/list")
-                .unwrap()
-                .to_owned()
+            5,
+            core_rules.path.get("GET /v1/file/list").unwrap().to_owned()
         );
 
         Ok(())
