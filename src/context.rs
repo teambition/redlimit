@@ -1,7 +1,7 @@
 use std::{
     cell::{Ref, RefMut},
     collections::HashMap,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::Instant,
 };
 
 use actix_utils::future::{ready, Ready};
@@ -13,14 +13,9 @@ use actix_web::{
 use futures_core::future::LocalBoxFuture;
 use serde_json::Value;
 
-pub struct ContextTransform;
+pub use structured_logger::unix_ms;
 
-pub fn unix_ms() -> u64 {
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time before Unix epoch");
-    ts.as_millis() as u64
-}
+pub struct ContextTransform;
 
 pub struct Context {
     pub unix_ms: u64,
@@ -116,7 +111,6 @@ where
             let res = fut.await?;
             {
                 let ctx = res.request().context_mut().unwrap();
-                let kv = serde_json::to_string(&ctx.log).unwrap_or("{}".to_string());
                 log::info!(target: "api",
                     method = log_method,
                     path = log_path,
@@ -124,8 +118,8 @@ where
                     status = res.response().status().as_u16(),
                     start = ctx.unix_ms,
                     elapsed = ctx.start.elapsed().as_millis() as u64,
-                    kv = kv;
-                    "ok",
+                    kv = log::as_serde!(&ctx.log);
+                    "",
                 );
             }
             Ok(res)

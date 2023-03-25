@@ -1,9 +1,10 @@
-use std::{fs::File, io::BufReader};
+use std::{fs::File, io::BufReader, io::stdout};
 
 use actix_web::{web, App, HttpServer};
 use rustls::{Certificate, PrivateKey, ServerConfig};
 use rustls_pemfile::{certs, read_one, Item};
 use tokio::time::Duration;
+use structured_logger::{json::new_json_writer, Logger};
 
 mod api;
 mod conf;
@@ -19,8 +20,11 @@ const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 async fn main() -> anyhow::Result<()> {
     let cfg = conf::Conf::new().unwrap_or_else(|err| panic!("config error: {}", err));
 
-    std::env::set_var("LOG_LEVEL", cfg.log.level.as_str());
-    std_logger::Config::json().init();
+    Logger::with_level(cfg.log.level.as_str())
+        // set a specific writer (format to JSON, write to stdout) for target "request".
+        .with_target_writer("api", new_json_writer(stdout()))
+        .init();
+
     log::debug!("{:?}", cfg);
 
     let pool = web::Data::new(
