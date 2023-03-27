@@ -74,8 +74,8 @@ Content-Type: application/json
 * `retry` 对应 `retry-after`，但其精度单位为毫秒，为 0 一定表示未被限速，n >= 1 表示被限速，n 毫秒后可以重试。
 
 同时，本次 HTTP 请求会生成一条 JSON 请求日志，类似这样：
-```
-{"timestamp":"2023-03-22T09:50:02.209734Z","level":"INFO","message":"ok","target":"api","module":"redlimit::context","method":"POST","path":"/limiting","xid":"","status":200,"start":1679478602195,"elapsed":14,"kv":"{\"id\":\"user123\",\"scope\":\"core\",\"bursted\":false,\"path\":\"GETs /v1/file/list\",\"count\":5,\"limited\":false}"}
+```json
+{"elapsed":4,"kv":{"id":"user123","scope":"core","count":1,"bursted":false,"path":"POST /v1/file/list","limited":false},"level":"INFO","message":"","method":"POST","path":"/limiting","start":1679914348751,"status":200,"target":"api","timestamp":1679914348756,"xid":""}
 ```
 其中：
 * `path` 为本次请求的 API 路径。
@@ -153,8 +153,8 @@ GET http://localhost:8080/version
 ```
 
 同时该 API 会产生如下访问日志：
-```
-{"timestamp":"2023-03-23T01:47:22.789366Z","level":"INFO","message":"ok","target":"api","module":"redlimit::context","method":"GET","path":"/version","xid":"","status":200,"start":1679536042789,"elapsed":0,"kv":"{\"idle_connections\":6,\"connections\":6}"}
+```json
+{"elapsed":0,"kv":{"idle_connections":6,"connections":6},"level":"INFO","message":"","method":"GET","path":"/version","start":1679914386823,"status":200,"target":"api","timestamp":1679914386823,"xid":""}
 ```
 其中 `kv.idle_connections`, `kv.connections` 为当前服务中 redis pool 状态，`kv.connections` 为 0 表示 redis 服务异常。
 
