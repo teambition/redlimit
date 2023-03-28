@@ -1,10 +1,10 @@
-use std::{fs::File, io::BufReader, io::stdout};
+use std::{fs::File, io::BufReader};
 
 use actix_web::{web, App, HttpServer};
 use rustls::{Certificate, PrivateKey, ServerConfig};
 use rustls_pemfile::{certs, read_one, Item};
-use tokio::time::Duration;
-use structured_logger::{json::new_json_writer, Logger};
+use structured_logger::{async_json::new_writer, Builder};
+use tokio::{io, time::Duration};
 
 mod api;
 mod conf;
@@ -20,9 +20,8 @@ const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 async fn main() -> anyhow::Result<()> {
     let cfg = conf::Conf::new().unwrap_or_else(|err| panic!("config error: {}", err));
 
-    Logger::with_level(cfg.log.level.as_str())
-        // set a specific writer (format to JSON, write to stdout) for target "request".
-        .with_target_writer("api", new_json_writer(stdout()))
+    Builder::with_level(cfg.log.level.as_str())
+        .with_target_writer("api", new_writer(io::stdout()))
         .init();
 
     log::debug!("{:?}", cfg);

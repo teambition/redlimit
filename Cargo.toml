@@ -1,6 +1,6 @@
 [package]
 name = "redlimit"
-version = "0.2.6"
+version = "0.2.7"
 edition = "2021"
 description = "A redis-based distributed rate limit HTTP service."
 publish = false
@@ -25,4 +25,4 @@ log = { version = "0.4", features = ["kv_unstable_serde"] }
 bb8 = "0.8"
 config = { version = "0.13", features = ["toml"] }
 anyhow = "1"
-structured-logger = "0.3"
+structured-logger = "0.4"
