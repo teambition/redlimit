@@ -1,6 +1,6 @@
 [package]
 name = "redlimit"
-version = "0.2.7"
+version = "0.2.8"
 edition = "2021"
 description = "A redis-based distributed rate limit HTTP service."
 publish = false
@@ -13,10 +13,10 @@ keywords = ["ratelimit", "redis", "distributed"]
 [dependencies]
 rustls = "0.20"
 rustls-pemfile = "1"
-actix-web = { version = "4.3", features = ["rustls"] }
+actix-web = { version = "4", features = ["rustls"] }
 actix-utils = "3"
 futures-core = "0.3"
-tokio = { version = "1.26", features = ["full"] }
+tokio = { version = "1.27", features = ["full"] }
 tokio-util = "0.7"
 rustis = { version = "0.10", features = ["pool"] }
 serde = { version = "1", features = ["derive"] }
@@ -25,4 +25,7 @@ log = { version = "0.4", features = ["kv_unstable_serde"] }
 bb8 = "0.8"
 config = { version = "0.13", features = ["toml"] }
 anyhow = "1"
-structured-logger = "0.4"
+structured-logger = "0.5"
+
+[profile.release]
+lto = true
