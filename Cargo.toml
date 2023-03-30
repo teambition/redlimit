@@ -1,6 +1,6 @@
 [package]
 name = "redlimit"
-version = "0.2.8"
+version = "0.2.9"
 edition = "2021"
 description = "A redis-based distributed rate limit HTTP service."
 publish = false
@@ -23,6 +23,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 log = { version = "0.4", features = ["kv_unstable_serde"] }
 bb8 = "0.8"
+async-trait = "0.1"
 config = { version = "0.13", features = ["toml"] }
 anyhow = "1"
 structured-logger = "0.5"

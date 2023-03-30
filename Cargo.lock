@@ -1046,11 +1046,12 @@ dependencies = [
 
 [[package]]
 name = "redlimit"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "actix-utils",
  "actix-web",
  "anyhow",
+ "async-trait",
  "bb8",
  "config",
  "futures-core",
@@ -1330,9 +1331,9 @@ checksum = "6e63cff320ae2c57904679ba7cb63280a3dc4613885beafb148ee7bf9aa9042d"
 
 [[package]]
 name = "structured-logger"
-version = "0.5.0"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a69d82683e54fa0a65310ffdf99bd4f2af1a36e471553d667f3e9f435a864bd"
+checksum = "21f881fcb8988c343b54c1763d35d4a7a985fe8179339e32278bd84cfc48ca14"
 dependencies = [
  "log",
  "parking_lot",
