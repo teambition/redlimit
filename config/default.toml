@@ -51,3 +51,12 @@ limit = [100, 10000, 50, 2000]
 # A path named "GET /v1/file/list" in scope "core", it's quantity is 5, default to 1 if no "path" matched.
 # You can add more <path = quantity> for scope "core".
 "GET /v1/file/list" = 5
+
+[rules.biz]
+limit = [100, 10000, 50, 2000]
+# default quantity is 1, but we can set it to other value (>= 1).
+quantity = 10
+
+[rules.biz.path]
+"GET /v1/app/info" = 1
+"GET /v2/app/info" = 3

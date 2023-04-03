@@ -35,6 +35,8 @@ pub struct Rule {
     pub limit: Vec<u64>,
 
     #[serde(default)]
+    pub quantity: u64,
+    #[serde(default)]
     pub path: HashMap<String, u64>,
 }
 
@@ -95,9 +97,21 @@ mod tests {
             .get("core")
             .ok_or(anyhow::Error::msg("'core' not exists"))?;
         assert_eq!(vec![100, 10000, 50, 2000], core_rules.limit);
+        assert_eq!(0, core_rules.quantity);
         assert_eq!(
             5,
             core_rules.path.get("GET /v1/file/list").unwrap().to_owned()
+        );
+
+        let biz_rules = cfg
+            .rules
+            .get("biz")
+            .ok_or(anyhow::Error::msg("'biz' not exists"))?;
+        assert_eq!(vec![100, 10000, 50, 2000], biz_rules.limit);
+        assert_eq!(10, biz_rules.quantity);
+        assert_eq!(
+            1,
+            biz_rules.path.get("GET /v1/app/info").unwrap().to_owned()
         );
 
         Ok(())

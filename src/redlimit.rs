@@ -57,6 +57,7 @@ impl RedRules {
             floor: vec![2, 10000, 1, 1000],
             defaut: Rule {
                 limit: vec![5, 5000, 2, 1000],
+                quantity: 1,
                 path: HashMap::new(),
             },
             rules: HashMap::new(),
@@ -120,8 +121,9 @@ impl RedRules {
             }
         }
 
-        let quantity = rule.path.get(path).unwrap_or(&1);
-        LimitArgs::new(*quantity, &rule.limit)
+        let quantity = *rule.path.get(path).unwrap_or(&rule.quantity);
+        let quantity = if quantity > 0 { quantity } else { 1 };
+        LimitArgs::new(quantity, &rule.limit)
     }
 
     pub async fn dyn_update(
@@ -564,6 +566,26 @@ mod tests {
                     .limit_args(0, "core2", "GET /v1/file/list", "user1")
                     .await,
                 "scope not exists"
+            );
+
+            assert_eq!(
+                LimitArgs(1, 100, 10000, 50, 2000),
+                redrules
+                    .limit_args(0, "biz", "GET /v1/app/info", "user1")
+                    .await
+            );
+            assert_eq!(
+                LimitArgs(3, 100, 10000, 50, 2000),
+                redrules
+                    .limit_args(0, "biz", "GET /v2/app/info", "user1")
+                    .await
+            );
+            assert_eq!(
+                LimitArgs(10, 100, 10000, 50, 2000),
+                redrules
+                    .limit_args(0, "biz", "GET /v3/app/info", "user1")
+                    .await,
+                "any user"
             );
         }
 
